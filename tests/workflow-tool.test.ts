@@ -213,6 +213,80 @@ test("a stop from /workflows throws ✘ Stopped in … followed by the user-stop
   assert.equal(workflowRuns.list()[0].status, "stopped");
 });
 
+test("completed result lists failed agents under Agent errors, after the result", async () => {
+  const tool = toolWith(async (p) => {
+    if (p === "FAIL") throw new Error("404 not_found_error");
+    return "ok";
+  });
+  const result = await tool.execute(
+    "id",
+    {
+      script: `${header("agent_errors_done")}return await parallel([() => agent('FAIL', {label:'bad'}), () => agent('ok', {label:'good'})])`,
+    },
+    undefined,
+    undefined,
+    makeCtx(),
+  );
+  const [part] = result.content;
+  assert.equal(part.type, "text");
+  assert.match(part.text, /Result:\n[\s\S]*\]\n\nAgent errors:\n- agent bad failed: 404 not_found_error$/);
+});
+
+test("a run with no failed agents has no Agent errors section", async () => {
+  const tool = toolWith(async (p) => p);
+  const result = await tool.execute(
+    "id",
+    { script: `${header("no_agent_errors")}return await agent('ok', {label:'good'})` },
+    undefined,
+    undefined,
+    makeCtx(),
+  );
+  const [part] = result.content;
+  assert.equal(part.type, "text");
+  assert.doesNotMatch(part.text, /Agent errors:/);
+});
+
+test("a failed run's error lists failed agents after the status line and message", async () => {
+  const tool = toolWith(async (p) => {
+    if (p === "FAIL") throw new Error("404 not_found_error");
+    return "ok";
+  });
+  await assert.rejects(
+    tool.execute(
+      "id",
+      { script: `${header("agent_errors_fail")}await agent('FAIL', {label:'bad'}); throw new Error("boom")` },
+      undefined,
+      undefined,
+      makeCtx(),
+    ),
+    (error: Error) => {
+      assert.match(
+        error.message,
+        /^✘ Failed in \d+s · 1 agents · 0 tokens\nboom\n\nAgent errors:\n- agent bad failed: 404 not_found_error$/,
+      );
+      return true;
+    },
+  );
+});
+
+test("a long agent error is capped at 500 characters on its Agent errors line", async () => {
+  const tool = toolWith(async (p) => {
+    if (p === "FAIL") throw new Error("x".repeat(600));
+    return "ok";
+  });
+  const result = await tool.execute(
+    "id",
+    { script: `${header("agent_errors_long")}return await agent('FAIL', {label:'bad'})` },
+    undefined,
+    undefined,
+    makeCtx(),
+  );
+  const [part] = result.content;
+  assert.equal(part.type, "text");
+  const line = part.text.split("\n").find((l) => l.startsWith("- agent bad failed: "));
+  assert.equal(line?.length, 2 + 500);
+});
+
 test("F1: stopping a run with queued agents never marks one running, and a skipped agent stays skipped", async () => {
   const tool = createWorkflowTool({
     concurrency: 1,

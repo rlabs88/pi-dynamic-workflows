@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Type } from "typebox";
 import {
   type AgentRunEvent,
   createSessionEventMapper,
@@ -7,6 +8,7 @@ import {
   type WorkflowSession,
   type WorkflowSessionOptions,
 } from "../src/agent.js";
+import { runWorkflow } from "../src/workflow.js";
 
 function assistantEnd(usage: unknown, model?: string) {
   return { type: "message_end", message: { role: "assistant", model, usage, stopReason: "stop", content: [] } };
@@ -89,11 +91,17 @@ test("mapper: malformed and lifecycle events produce nothing", () => {
   }
 });
 
+/** The assistant message a session ends its turn with; undefined keeps the plain text reply. */
+type Turn = (prompt: string) => unknown;
+
 class FakeSession implements WorkflowSession {
   messages: unknown[] = [];
   model?: { id: string };
   listeners = new Set<(event: unknown) => void>();
-  constructor(private readonly reply: string) {}
+  constructor(
+    private readonly reply: string,
+    private readonly turn?: Turn,
+  ) {}
   subscribe(listener: (event: unknown) => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -101,7 +109,12 @@ class FakeSession implements WorkflowSession {
   emit(event: unknown) {
     for (const l of this.listeners) l(event);
   }
-  async prompt() {
+  async prompt(text: string) {
+    const final = this.turn?.(text);
+    if (final !== undefined) {
+      this.messages.push(final);
+      return;
+    }
     this.emit({ type: "message_start", message: { role: "assistant" } });
     this.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: this.reply } });
     this.messages.push({ role: "assistant", content: [{ type: "text", text: this.reply }] });
@@ -113,10 +126,10 @@ class FakeSession implements WorkflowSession {
   }
 }
 
-function fakeFactory(sessions: FakeSession[], options: WorkflowSessionOptions[]) {
+function fakeFactory(sessions: FakeSession[], options: WorkflowSessionOptions[], turn?: Turn) {
   return async (opts: WorkflowSessionOptions) => {
     options.push(opts);
-    const session = new FakeSession(`reply${sessions.length}`);
+    const session = new FakeSession(`reply${sessions.length}`, turn);
     session.model = opts.model;
     sessions.push(session);
     return { session };
@@ -156,4 +169,122 @@ test("agent: session agentIds are unique across instances without a runId", asyn
   const ids = opts.map((o) => o.agentId);
   assert.equal(typeof ids[0], "string");
   assert.notEqual(ids[0], ids[1]);
+});
+
+const providerError = { role: "assistant", content: [], stopReason: "error", errorMessage: "404 not_found_error" };
+const failingTurn: Turn = (prompt) => (prompt.includes("FAIL") ? providerError : undefined);
+
+test("agent: a turn that ends in a provider error rejects with the provider's message", async () => {
+  const agent = new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], failingTurn) });
+  await assert.rejects(() => agent.run("FAIL: call the model"), { message: "404 not_found_error" });
+});
+
+test("agent: a provider error without errorMessage rejects with a fallback message", async () => {
+  const turn = () => ({ role: "assistant", content: [], stopReason: "error" });
+  const agent = new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], turn) });
+  await assert.rejects(() => agent.run("x"), { message: "Model request failed" });
+});
+
+test("agent: a structured-output agent whose turn ends in a provider error reports that error", async () => {
+  const agent = new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], failingTurn) });
+  const schema = Type.Object({ ok: Type.Boolean() });
+  await assert.rejects(() => agent.run("FAIL: call the model", { schema }), { message: "404 not_found_error" });
+});
+
+test("agent: an aborted turn does not report a provider error", async () => {
+  const turn = () => ({ role: "assistant", content: [], stopReason: "aborted", errorMessage: "Request was aborted" });
+  const agent = new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], turn) });
+  assert.equal(await agent.run("x"), "");
+});
+
+test("agent: normal stop replies are returned unchanged, including an empty one", async () => {
+  const text = { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" };
+  const empty = { role: "assistant", content: [], stopReason: "stop" };
+  assert.equal(await new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], () => text) }).run("x"), "ok");
+  assert.equal(await new WorkflowAgent({ tools: [], createSession: fakeFactory([], [], () => empty) }).run("x"), "");
+});
+
+/** A session that emits events but keeps only `transcript`, as omp does after a retry strips a failed turn. */
+class EventOnlySession implements WorkflowSession {
+  readonly messages: unknown[];
+  private readonly listeners = new Set<(event: unknown) => void>();
+  constructor(
+    private readonly events: readonly unknown[],
+    transcript: readonly unknown[],
+  ) {
+    this.messages = [...transcript];
+  }
+  subscribe(listener: (event: unknown) => void) {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+  async prompt() {
+    for (const event of this.events) for (const listener of this.listeners) listener(event);
+  }
+  abort() {}
+  dispose() {}
+}
+
+function eventOnlyFactory(events: readonly unknown[], transcript: readonly unknown[]) {
+  return async () => ({ session: new EventOnlySession(events, transcript) });
+}
+
+const refusalEnd = {
+  type: "message_end",
+  message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Refusal (cyber): request declined" },
+};
+const successEnd = {
+  type: "message_end",
+  message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+};
+
+test("agent: a refusal seen only as a message_end event rejects with the provider's message", async () => {
+  const agent = new WorkflowAgent({ tools: [], createSession: eventOnlyFactory([refusalEnd], []) });
+  await assert.rejects(() => agent.run("x"), { message: "Refusal (cyber): request declined" });
+});
+
+test("agent: a successful assistant message_end after a provider error clears the error", async () => {
+  const agent = new WorkflowAgent({
+    tools: [],
+    createSession: eventOnlyFactory([refusalEnd, successEnd], [successEnd.message]),
+  });
+  assert.equal(await agent.run("x"), "ok");
+});
+
+test("workflow: a provider error makes agent() return null, log and end failed with the message; a sibling completes", async () => {
+  const ends: Array<{ label: string; status: string; error?: string }> = [];
+  const result = await runWorkflow(
+    `export const meta = {
+  name: 'provider_error',
+  description: 'One agent hits a provider error'
+}
+
+const [bad, good] = await parallel([
+  () => agent('FAIL: call the model', { label: 'bad' }),
+  () => agent('Reply with exactly: ok', { label: 'good' }),
+])
+return [bad, good]
+`,
+    {
+      tools: [],
+      createSession: fakeFactory([], [], failingTurn),
+      onAgentEnd(event) {
+        ends.push({ label: event.label, status: event.status, error: event.error });
+      },
+    },
+  );
+  const outcome = result.result;
+  assert(Array.isArray(outcome));
+  assert.equal(outcome[0], null);
+  assert.equal(typeof outcome[1], "string");
+  assert.ok(result.logs.includes("agent bad failed: 404 not_found_error"));
+  assert.deepEqual(
+    ends.find((e) => e.label === "bad"),
+    {
+      label: "bad",
+      status: "failed",
+      error: "404 not_found_error",
+    },
+  );
+  assert.equal(ends.find((e) => e.label === "good")?.status, "done");
 });

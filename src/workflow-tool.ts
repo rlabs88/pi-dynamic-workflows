@@ -147,7 +147,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         syncSnapshotAgents();
         snapshot.durationMs = durationMs;
         display.complete(snapshot);
-        return new Error(`${statusLineFor(word, durationMs)}\n${message}`);
+        return new Error(`${statusLineFor(word, durationMs)}\n${message}${agentErrorSection(snapshot.logs)}`);
       };
 
       startStatusWidget();
@@ -230,7 +230,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         content: [
           {
             type: "text",
-            text: `${statusLine}\n\nWorkflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}`,
+            text: `${statusLine}\n\nWorkflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}${agentErrorSection(result.logs)}`,
           },
         ],
         details: {
@@ -359,4 +359,14 @@ function normalizeWorkflowScript(script: string): string {
 function isAbortError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return /\babort(?:ed)?\b/i.test(error.message);
+}
+
+const agentFailureLog = /^agent .+ (?:failed: |stopped by user$)/;
+
+// Failed and stopped agents, one line each in log order, so the parent model can see why they did not finish.
+function agentErrorSection(logs: readonly string[]): string {
+  const lines = logs
+    .filter((line) => agentFailureLog.test(line))
+    .map((line) => `- ${line.replace(/\s+/g, " ").trim().slice(0, 500)}`);
+  return lines.length > 0 ? `\n\nAgent errors:\n${lines.join("\n")}` : "";
 }

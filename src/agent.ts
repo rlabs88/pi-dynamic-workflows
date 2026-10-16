@@ -166,6 +166,39 @@ export function createSessionEventMapper(): (event: unknown) => AgentRunEvent[] 
   };
 }
 
+/** How an assistant turn ended: its stop reason and the provider's error text, read through type guards. */
+interface TurnEnd {
+  readonly stopReason?: string;
+  readonly errorMessage?: string;
+}
+
+/** The last assistant message in a session transcript, read through type guards. */
+function lastAssistantMessage(messages: readonly unknown[]): Record<string, unknown> | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (isRecord(message) && message.role === "assistant") return message;
+  }
+  return undefined;
+}
+
+function turnEndOf(message: Record<string, unknown> | undefined): TurnEnd | undefined {
+  if (message === undefined) return undefined;
+  return { stopReason: str(message.stopReason), errorMessage: str(message.errorMessage) };
+}
+
+/** The turn end carried by an assistant `message_end` event, if the event is one. */
+function assistantTurnEnd(event: unknown): TurnEnd | undefined {
+  if (!isRecord(event) || event.type !== "message_end") return undefined;
+  const message = event.message;
+  return isRecord(message) && message.role === "assistant" ? turnEndOf(message) : undefined;
+}
+
+/** A turn that ended in a provider error has no reply; throw the provider's message instead of an empty result. */
+function throwIfTurnFailed(turn: TurnEnd | undefined): void {
+  if (turn?.stopReason !== "error") return;
+  throw new Error(turn.errorMessage?.trim() ? turn.errorMessage : "Model request failed");
+}
+
 // ── WorkflowAgent ──────────────────────────────────────────
 
 export class WorkflowAgent {
@@ -231,6 +264,8 @@ export class WorkflowAgent {
     let removeAbortListener: (() => void) | undefined;
     let unsubscribe: (() => void) | undefined;
     const mapFn = createSessionEventMapper();
+    // omp drops failed assistant turns from `session.messages`, so the last observed assistant `message_end` is the source of truth too.
+    let observedTurn: TurnEnd | undefined;
 
     try {
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
@@ -240,18 +275,16 @@ export class WorkflowAgent {
         removeAbortListener = () => options.signal?.removeEventListener("abort", onAbort);
       }
 
-      // Subscribe to session events and forward mapped events
-      if (options.onEvent) {
-        unsubscribe = session.subscribe((raw: unknown) => {
-          const events = mapFn(raw);
-          for (const e of events) {
-            options.onEvent?.(e);
-          }
-        });
-      }
+      unsubscribe = session.subscribe((raw: unknown) => {
+        const turn = assistantTurnEnd(raw);
+        if (turn) observedTurn = turn;
+        for (const e of mapFn(raw)) options.onEvent?.(e);
+      });
 
       await session.prompt(fullPrompt);
       if (options.signal?.aborted) throw new Error("Subagent was aborted");
+      throwIfTurnFailed(observedTurn);
+      throwIfTurnFailed(turnEndOf(lastAssistantMessage(session.messages)));
 
       if (options.schema) {
         if (!capture.called) {
