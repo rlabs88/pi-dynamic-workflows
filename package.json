@@ -24,7 +24,7 @@
   "scripts": {
     "test": "npm run check && npm run build && npm run test:unit",
     "test:unit": "tsx --test tests/**/*.test.ts",
-    "check": "biome check .",
+    "check": "biome check . && tsc -p tsconfig.extensions.json",
     "format": "biome format --write .",
     "lint": "biome lint .",
     "build": "tsc",
@@ -37,6 +37,11 @@
     "agents"
   ],
   "pi": {
+    "extensions": [
+      "extensions/workflow.ts"
+    ]
+  },
+  "omp": {
     "extensions": [
       "extensions/workflow.ts"
     ]

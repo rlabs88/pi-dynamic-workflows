@@ -1,6 +1,6 @@
 # pi-dynamic-workflows
 
-> Claude-Code-style dynamic workflows for [Pi](https://github.com/earendil-works/pi).
+> Claude-Code-style dynamic workflows for [Pi](https://github.com/earendil-works/pi) and omp, with a `/workflows` drill-down view.
 
 A Pi extension that adds a `workflow` tool. Instead of one assistant doing everything sequentially, the model writes a small JavaScript script that fans out the work across many isolated subagents, then synthesizes the results.
 
@@ -11,18 +11,19 @@ Inspired by Anthropic's [dynamic workflows in Claude Code](https://claude.com/bl
 ## Install
 
 ```bash
-pi install npm:pi-dynamic-workflows
+# pi
+pi install git:github.com/rlabs88/pi-dynamic-workflows
 # or from a local checkout
 pi install /path/to/pi-dynamic-workflows
+
+# omp (local checkout; omp loads the same entry through package.json "omp.extensions")
+git clone https://github.com/rlabs88/pi-dynamic-workflows
+omp install /path/to/pi-dynamic-workflows
 ```
 
-Then in Pi:
+Then restart the session (or run `/reload` in pi).
 
-```text
-/reload
-```
-
-That's it. The extension registers a `workflow` tool and activates it on session start.
+The extension registers a `workflow` tool, activates it on session start, and adds the `/workflows` command and the `ctrl+alt+w` shortcut.
 
 ## Usage
 
@@ -43,7 +44,55 @@ The model will write a workflow script and call the `workflow` tool. Live progre
     #3 ✓ final summary
 ```
 
-Press `Esc` to cancel a running workflow. Active subagents are aborted and surfaced as skipped.
+Press `Esc` to cancel a running workflow. Active subagents are aborted and the tool row shows `✘ Stopped in …`.
+
+### Drill-down view
+
+While a workflow runs, a status line below the editor shows its progress:
+
+```text
+◯ e2e_drill  ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱  2/3 · 35s · ↓ 26.0k tokens
+```
+
+Open `/workflows` or press `ctrl+alt+w` (during or after a run) to browse runs. The view opens on the run list, or directly on the run when there is only one. Drill down from phases to agents to one agent's card. Captured from a live pi session (one agent was stopped with `x`):
+
+```text
+╭ Read · 3 agents ──────────────┬ read math.js ────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ ✔ read math.js          35s │ ✔ Completed · deepseek/deepseek-v4-flash                                                             │
+│   ✔ read stats.js         32s │ 35.6k tok · 3 tool calls · 35s                                                                       │
+│   ✘ read strings.js       37s │                                                                                                      │
+│                               │ Prompt                                                                                               │
+│                               │   Run the bash command `sleep 25`, then read math.js and reply with one line describing its exports. │
+│                               │                                                                                                      │
+│                               │ Activity · ⏎ expand                                                                                  │
+│                               │   ✔ bash(command: sleep 25, timeout: 40)                                                             │
+│                               │   ✔ bash(command: ls)                                                                                │
+│                               │   ✔ read(path: math.js)                                                                              │
+│                               │                                                                                                      │
+│                               │ Outcome                                                                                              │
+│                               │   math.js exports two functions, `add` and `mul`, which perform addition and multiplication.         │
+╰───────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────────────────╯
+↑↓ agent · ⏎ expand · esc back
+```
+
+The agent card shows:
+
+- **Prompt**: the task the script passed to `agent()`, 2 lines when collapsed. Expanded, it shows the full prompt the subagent received, including the injected phase and label lines.
+- **Activity**: tool calls; expand for arguments and results.
+- **Outcome**: the final output (JSON is pretty-printed), the error for a failed agent, or the agent's streamed text while it runs.
+- Tokens, tool-call count, and duration in the header. The card updates live.
+
+| Key | Effect |
+| --- | --- |
+| `↑` `↓` | Move the selection (at the card level: previous or next agent) |
+| `enter` `→` | Open: run → phases → agents → agent card; on a card, expand or collapse |
+| `esc` `←` | Back one level; close from the top |
+| `j` `k` | Scroll the agent card; at the phases and agents levels, move the selection |
+| `pageup` `pagedown` | Scroll the agent card by a page |
+| `x` | Stop the selected run, the whole workflow (phases level), or one agent (card level). A stopped agent returns `null` to the script. |
+| `f` | Filter agents by status (agents level) |
+
+Runs are kept in memory for the current session (last 10). The layout splits into two panes at 64 columns or wider and falls back to one column below that. [`docs/cc-workflow-ui-spec.md`](docs/cc-workflow-ui-spec.md) records the Claude Code behavior this follows and the parts not implemented.
 
 ## Workflow script shape
 
@@ -136,23 +185,27 @@ user prompt
   → Pi model writes a workflow script
   → workflow tool parses + runs script in a vm sandbox
   → script calls agent(), parallel(), pipeline()
-  → each agent() spawns an in-memory Pi subagent session
-  → snapshots stream back as compact progress
+  → each agent() spawns an in-memory subagent session
+  → session events (tool calls, text, usage) feed the run store
+  → the tool row, status line, and /workflows view render from the store
   → final structured result returned to the parent assistant
 ```
 
-Subagents run in fresh in-memory Pi sessions with the standard coding tools, so they can read files, run shell commands, and call structured output exactly like a normal Pi turn.
+Subagents run in fresh in-memory sessions with the standard coding tools, so they can read files, run shell commands, and call structured output exactly like a normal turn. On omp each subagent registers under its own agent id, so parallel subagents do not replace each other.
 
 ## Library modules
 
 | File | Purpose |
 | --- | --- |
 | `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
-| `src/workflow-tool.ts` | The Pi `workflow` tool, prompt guidelines, rendering, abort handling. |
-| `src/agent.ts` | `WorkflowAgent`, an in-memory Pi subagent runner. |
+| `src/workflow-tool.ts` | The `workflow` tool: prompt guidelines, tool row rendering, status line, abort handling. |
+| `src/agent.ts` | `WorkflowAgent`, an in-memory subagent runner, and the session event mapper. |
+| `src/run-store.ts` | In-memory run store: per-agent prompt, tool calls, output, tokens, status; stop controls. |
+| `src/workflow-view.ts` | The `/workflows` drill-down view: pure renderer, key reducer, and TUI component. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
-| `extensions/workflow.ts` | The Pi extension entrypoint. |
+| `src/format.ts` | Shared duration and token formatting, and the "agent finished" rule used by every surface. |
+| `extensions/workflow.ts` | The extension entrypoint for pi and omp (`workflow` tool, `/workflows`, `ctrl+alt+w`). |
 
 ## Development
 
@@ -166,7 +219,7 @@ Parser unit tests live in `tests/workflow-parser.test.ts` and cover both accepte
 
 ## Status
 
-This is a prototype. It implements the core workflow primitive (script, subagents, parallel/pipeline, phases, abort, structured output) but does not yet implement persisted or resumable runs, or a `/workflows` manager.
+This is a prototype. It implements the core workflow primitive (script, subagents, parallel/pipeline, phases, abort, structured output) and the `/workflows` drill-down view. It does not implement persisted or resumable runs, pause/resume, agent restart, or saving scripts as reusable workflows.
 
 ## License
 

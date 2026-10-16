@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isAgentFinished } from "./format.js";
 import type { WorkflowMeta } from "./workflow.js";
 
 export type WorkflowAgentStatus = "queued" | "running" | "done" | "error" | "skipped";
@@ -59,7 +60,7 @@ export function createWorkflowSnapshot(meta: WorkflowMeta): WorkflowSnapshot {
 
 export function recomputeWorkflowSnapshot(snapshot: WorkflowSnapshot): WorkflowSnapshot {
   const runningCount = snapshot.agents.filter((agent) => agent.status === "running").length;
-  const doneCount = snapshot.agents.filter((agent) => agent.status === "done").length;
+  const doneCount = snapshot.agents.filter((agent) => isAgentFinished(agent.status)).length;
   const errorCount = snapshot.agents.filter((agent) => agent.status === "error").length;
   return { ...snapshot, agentCount: snapshot.agents.length, runningCount, doneCount, errorCount };
 }
@@ -151,11 +152,11 @@ export function renderWorkflowLines(snapshot: WorkflowSnapshot, options: Workflo
     const agents = snapshot.agents.filter((agent) => agent.phase === phase);
     if (agents.length === 0 && snapshot.currentPhase !== phase) continue;
     for (const agent of agents) rendered.add(agent);
-    const done = agents.filter((agent) => agent.status === "done").length;
+    const done = agents.filter((agent) => isAgentFinished(agent.status)).length;
     const running = agents.filter((agent) => agent.status === "running").length;
     const errors = agents.filter((agent) => agent.status === "error").length;
     const skipped = agents.filter((agent) => agent.status === "skipped").length;
-    const complete = agents.length > 0 && done + errors + skipped === agents.length;
+    const complete = agents.length > 0 && done === agents.length;
     const marker = running > 0 || (!complete && snapshot.currentPhase === phase) ? "▶" : complete ? "✓" : " ";
     lines.push(
       `  ${marker} ${phase} ${done}/${agents.length}${running ? ` · ${running} running` : ""}${errors ? ` · ${errors} errors` : ""}${skipped ? ` · ${skipped} skipped` : ""}`,

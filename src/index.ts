@@ -1,4 +1,12 @@
-export type { AgentRunOptions, AgentRunResult, WorkflowAgentOptions } from "./agent.js";
+export type {
+  AgentRunEvent,
+  AgentRunOptions,
+  AgentRunResult,
+  WorkflowAgentOptions,
+  WorkflowSession,
+  WorkflowSessionFactory,
+  WorkflowSessionOptions,
+} from "./agent.js";
 export { WorkflowAgent } from "./agent.js";
 export type {
   WorkflowAgentSnapshot,
@@ -16,6 +24,15 @@ export {
   renderWorkflowLines,
   renderWorkflowText,
 } from "./display.js";
+export type {
+  AgentRecord,
+  AgentStatus,
+  RunRecord,
+  RunStatus,
+  ToolCallRecord,
+  WorkflowRunSource,
+} from "./run-store.js";
+export { workflowRuns } from "./run-store.js";
 export type { StructuredOutputCapture, StructuredOutputToolOptions } from "./structured-output.js";
 export { createStructuredOutputTool } from "./structured-output.js";
 export type {
@@ -28,3 +45,4 @@ export type {
 export { parseWorkflowScript, runWorkflow } from "./workflow.js";
 export type { WorkflowToolInput, WorkflowToolOptions } from "./workflow-tool.js";
 export { createWorkflowTool } from "./workflow-tool.js";
+export { openWorkflowsView } from "./workflow-view.js";

@@ -1,14 +1,19 @@
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import type { AgentRunEvent, WorkflowAgent } from "./agent.js";
 import {
   createToolUpdateWorkflowDisplay,
   createWorkflowSnapshot,
   preview,
   recomputeWorkflowSnapshot,
-  renderWorkflowText,
+  renderWorkflowLines,
+  type WorkflowAgentSnapshot,
+  type WorkflowAgentStatus,
   type WorkflowSnapshot,
 } from "./display.js";
+import { formatDuration, formatTokens, isAgentFinished } from "./format.js";
+import { type AgentRecord, type AgentStatus, type RunRecord, workflowRuns } from "./run-store.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
 
 const workflowToolSchema = Type.Object({
@@ -41,6 +46,8 @@ const workflowDisplayOptions = {
 export interface WorkflowToolOptions {
   cwd?: string;
   concurrency?: number;
+  /** Subagent runner; defaults to a session-backed WorkflowAgent. */
+  agent?: Pick<WorkflowAgent, "run">;
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
@@ -76,97 +83,158 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const script = normalizeWorkflowScript(params.script);
       const parsed = parseWorkflowScript(script);
+
+      const runController = new AbortController();
+      const runId = workflowRuns.startRun(parsed.meta, runController);
+
+      // Combine host signal with run's controller so "x" in the view stops the run
+      const combinedSignal = signal
+        ? (AbortSignal.any?.([signal, runController.signal]) ?? runController.signal)
+        : runController.signal;
+
       let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
       const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
+      const findRun = () => workflowRuns.list().find((r) => r.id === runId);
+
+      const syncSnapshotAgents = () => {
+        const run = findRun();
+        if (run) snapshot.agents = run.agents.map(toSnapshotAgent);
+        snapshot = recomputeWorkflowSnapshot(snapshot);
+      };
 
       const update = () => {
-        snapshot = recomputeWorkflowSnapshot(snapshot);
+        syncSnapshotAgents();
         display.update(snapshot);
       };
 
-      const recordPhase = (title: string | undefined) => {
-        if (!title) return;
-        if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
+      let statusTimer: ReturnType<typeof setInterval> | undefined;
+      let unsubscribeStatus: (() => void) | undefined;
+      const statusKey = `workflow-status-${runId}`;
+      const startStatusWidget = () => {
+        if (ctx.hasUI === false || !ctx.ui) return;
+        const updateStatus = () => {
+          const run = findRun();
+          if (run?.status !== "running") return;
+          ctx.ui.setWidget(statusKey, [formatRunStatusLine(run)], { placement: "belowEditor" });
+        };
+        updateStatus();
+        statusTimer = setInterval(updateStatus, 1000);
+        unsubscribeStatus = workflowRuns.subscribe(updateStatus);
       };
+      const clearStatusWidget = () => {
+        unsubscribeStatus?.();
+        unsubscribeStatus = undefined;
+        if (statusTimer !== undefined) {
+          clearInterval(statusTimer);
+          statusTimer = undefined;
+        }
+        if (ctx.hasUI !== false && ctx.ui) {
+          ctx.ui.setWidget(statusKey, undefined);
+        }
+      };
+
+      const statusLineFor = (word: "Completed" | "Failed" | "Stopped", durationMs: number) => {
+        const agents = findRun()?.agents ?? [];
+        const tokens = agents.reduce((s, a) => s + a.tokens, 0);
+        const icon = word === "Completed" ? "✔" : "✘";
+        return `${icon} ${word} in ${formatDuration(durationMs)} · ${agents.length} agents · ${formatTokens(tokens)} tokens`;
+      };
+
+      const fail = (word: "Failed" | "Stopped", message: string): Error => {
+        const durationMs = Date.now() - (findRun()?.startedAt ?? Date.now());
+        workflowRuns.finishRun(runId, word === "Stopped" ? "stopped" : "failed", message);
+        syncSnapshotAgents();
+        snapshot.durationMs = durationMs;
+        display.complete(snapshot);
+        return new Error(`${statusLineFor(word, durationMs)}\n${message}`);
+      };
+
+      startStatusWidget();
 
       let result: WorkflowRunResult;
       try {
         result = await runWorkflow(script, {
           cwd: options.cwd ?? ctx.cwd,
           args: params.args,
-          signal,
+          signal: combinedSignal,
           concurrency: options.concurrency,
+          agent: options.agent,
+          runId,
           session: {
             modelRegistry: ctx.modelRegistry,
             model: ctx.model,
           },
           onLog(message) {
+            workflowRuns.log(runId, message);
             snapshot.logs.push(message);
             update();
           },
           onPhase(title) {
+            workflowRuns.phase(runId, title);
             snapshot.currentPhase = title;
-            recordPhase(title);
+            if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
+            update();
+          },
+          onAgentQueued(event) {
+            workflowRuns.agentQueued(runId, event);
             update();
           },
           onAgentStart(event) {
-            if (signal?.aborted) throw new Error("Workflow was aborted");
-            recordPhase(event.phase);
-            snapshot.agents.push({
-              id: snapshot.agents.length + 1,
-              label: event.label,
-              phase: event.phase,
-              prompt: event.prompt,
-              status: "running",
+            workflowRuns.agentStarted(runId, event.id, { prompt: event.prompt });
+            update();
+          },
+          onAgentEvent(id, event: AgentRunEvent) {
+            workflowRuns.agentEvent(runId, id, event);
+          },
+          onAgentEnd(event) {
+            workflowRuns.agentEnded(runId, event.id, {
+              status: event.status,
+              result: event.result,
+              error: event.error,
             });
             update();
           },
-          onAgentEnd(event) {
-            const agent = [...snapshot.agents]
-              .reverse()
-              .find((item) => item.label === event.label && item.status === "running");
-            if (agent) {
-              agent.status = event.result === null ? "error" : "done";
-              agent.resultPreview = preview(event.result);
-            }
-            update();
+          onAgentControl(id, stop) {
+            workflowRuns.registerAgentStop(runId, id, stop);
           },
         });
       } catch (error) {
-        if (signal?.aborted || isAbortError(error)) {
-          for (const agent of snapshot.agents) {
-            if (agent.status === "running") {
-              agent.status = "skipped";
-              agent.error = "aborted";
-            }
-          }
-          snapshot = recomputeWorkflowSnapshot(snapshot);
-          display.complete(snapshot);
-          throw new Error("Workflow was aborted");
+        clearStatusWidget();
+        if (combinedSignal.aborted || isAbortError(error)) {
+          const byUser = runController.signal.aborted && !signal?.aborted;
+          throw fail("Stopped", byUser ? "Workflow was stopped by the user from /workflows" : "Workflow was aborted");
         }
-        throw error;
+        // Errors thrown inside the script's vm context are not `instanceof Error` here
+        throw fail("Failed", isRecord(error) && typeof error.message === "string" ? error.message : String(error));
       }
 
+      clearStatusWidget();
+
       if (result.agentCount === 0) {
-        throw new Error(
+        throw fail(
+          "Failed",
           "workflow scripts must call agent() at least once; this workflow declared phases but did not run any subagents",
         );
       }
 
+      workflowRuns.finishRun(runId, "completed");
+      syncSnapshotAgents();
       snapshot.result = result.result;
       snapshot.durationMs = result.durationMs;
-      snapshot = recomputeWorkflowSnapshot(snapshot);
       display.complete(snapshot);
+
+      const statusLine = statusLineFor("Completed", result.durationMs);
 
       return {
         content: [
           {
             type: "text",
-            text: `Workflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}`,
+            text: `${statusLine}\n\nWorkflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}`,
           },
         ],
         details: {
           ...snapshot,
+          statusLine,
           meta: result.meta,
           phases: result.phases,
           logs: result.logs,
@@ -179,13 +247,97 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       return new Text(theme.fg("toolTitle", theme.bold("workflow")), 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
-      const snapshot = result.details as WorkflowSnapshot | undefined;
-      if (snapshot?.name) {
-        return new Text(renderWorkflowText(snapshot, !isPartial, workflowDisplayOptions), 0, 0);
+      const details: unknown = result.details;
+      const snap = toRenderSnapshot(details);
+      if (snap) {
+        const lines = renderWorkflowLines(snap, workflowDisplayOptions);
+        if (isPartial) {
+          return new Text([...lines, "", theme.fg("muted", "/workflows to drill down")].join("\n"), 0, 0);
+        }
+        const statusLine = isRecord(details) && typeof details.statusLine === "string" ? details.statusLine : undefined;
+        return new Text((statusLine ? [statusLine, ...lines] : lines).join("\n"), 0, 0);
       }
+
       const text = result.content?.[0];
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
     },
+  });
+}
+
+/** Status widget line for a running run. Every finished agent status counts as done. */
+export function formatRunStatusLine(run: RunRecord, now = Date.now()): string {
+  const total = run.agents.length;
+  const done = run.agents.filter((a) => isAgentFinished(a.status)).length;
+  const tokens = run.agents.reduce((s, a) => s + a.tokens, 0);
+  const barWidth = 20;
+  const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
+  const bar = "▰".repeat(filled) + "▱".repeat(barWidth - filled);
+  return `◯ ${run.name}  ${bar}  ${done}/${total} · ${formatDuration(now - run.startedAt)} · ↓ ${formatTokens(tokens)} tokens`;
+}
+
+const snapshotStatus: Record<AgentStatus, WorkflowAgentStatus> = {
+  queued: "queued",
+  running: "running",
+  done: "done",
+  failed: "error",
+  skipped: "skipped",
+  stopped: "skipped",
+};
+
+function toSnapshotAgent(agent: AgentRecord): WorkflowAgentSnapshot {
+  return {
+    id: agent.id,
+    label: agent.label,
+    phase: agent.phase,
+    prompt: agent.prompt ?? agent.promptPreview,
+    status: snapshotStatus[agent.status],
+    resultPreview: agent.result !== undefined ? preview(agent.result) : undefined,
+    error: agent.error,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+const agentStatuses: readonly WorkflowAgentStatus[] = ["queued", "running", "done", "error", "skipped"];
+
+function isAgentStatus(value: unknown): value is WorkflowAgentStatus {
+  return agentStatuses.some((s) => s === value);
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function toRenderSnapshot(details: unknown): WorkflowSnapshot | undefined {
+  if (!isRecord(details) || typeof details.name !== "string" || !details.name) return undefined;
+  const agents: WorkflowAgentSnapshot[] = [];
+  if (Array.isArray(details.agents)) {
+    for (const a of details.agents) {
+      if (!isRecord(a)) continue;
+      agents.push({
+        id: typeof a.id === "number" ? a.id : agents.length + 1,
+        label: optionalString(a.label) ?? "",
+        phase: optionalString(a.phase),
+        prompt: optionalString(a.prompt) ?? "",
+        status: isAgentStatus(a.status) ? a.status : "queued",
+        resultPreview: optionalString(a.resultPreview),
+        error: optionalString(a.error),
+      });
+    }
+  }
+  const strings = (value: unknown) => (Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
+  return recomputeWorkflowSnapshot({
+    name: details.name,
+    phases: strings(details.phases),
+    currentPhase: optionalString(details.currentPhase),
+    logs: strings(details.logs),
+    agents,
+    agentCount: 0,
+    runningCount: 0,
+    doneCount: 0,
+    errorCount: 0,
   });
 }
 

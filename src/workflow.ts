@@ -2,7 +2,7 @@ import vm from "node:vm";
 import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
-import { WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
+import { type AgentRunEvent, WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -23,10 +23,23 @@ export interface WorkflowRunOptions extends WorkflowAgentOptions {
   concurrency?: number;
   tokenBudget?: number | null;
   signal?: AbortSignal;
+  /** Unique run identifier for subagent session identity. */
+  runId?: string;
   onLog?: (message: string) => void;
   onPhase?: (title: string) => void;
-  onAgentStart?: (event: { label: string; phase?: string; prompt: string }) => void;
-  onAgentEnd?: (event: { label: string; phase?: string; result: unknown }) => void;
+  onAgentQueued?: (event: { id: number; label: string; phase?: string; prompt: string }) => void;
+  onAgentStart?: (event: { id: number; label: string; phase?: string; prompt: string }) => void;
+  onAgentEvent?: (id: number, event: AgentRunEvent) => void;
+  onAgentEnd?: (event: {
+    id: number;
+    label: string;
+    phase?: string;
+    result: unknown;
+    status: "done" | "failed" | "skipped";
+    error?: string;
+  }) => void;
+  /** Called when each agent is queued, providing a stop function for that agent. */
+  onAgentControl?: (id: number, stop: () => void) => void;
 }
 
 export interface WorkflowRunResult<T = unknown> {
@@ -67,7 +80,7 @@ export async function runWorkflow<T = unknown>(
   const started = Date.now();
   const { meta, body } = parseWorkflowScript(script);
   const state: RuntimeState = { logs: [], phases: [], agentCount: 0, spent: 0 };
-  const agentRunner = options.agent ?? new WorkflowAgent(options);
+  const agentRunner = options.agent ?? new WorkflowAgent({ ...options, runId: options.runId });
   const concurrency = Math.max(
     1,
     Math.min(options.concurrency ?? Math.max(1, (globalThis.navigator?.hardwareConcurrency ?? 8) - 2), 16),
@@ -105,26 +118,97 @@ export async function runWorkflow<T = unknown>(
     const normalizedOptions = normalizeAgentOptions(agentOptions);
     const assignedPhase = normalizedOptions.phase ?? state.currentPhase;
     const requestedLabel = normalizedOptions.label?.trim();
+
+    // Assign the id before the limiter so queued agents are visible
+    state.agentCount++;
+    const agentId = state.agentCount;
+    const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
+
+    // Emit queued event
+    options.onAgentQueued?.({ id: agentId, label, phase: assignedPhase, prompt: taskPrompt });
+
+    // Per-agent AbortController linked to the workflow signal
+    const agentController = new AbortController();
+    const combinedSignal = options.signal
+      ? (AbortSignal.any?.([options.signal, agentController.signal]) ?? agentController.signal)
+      : agentController.signal;
+
+    let started = false;
+    const stop = () => {
+      if (agentController.signal.aborted) return;
+      agentController.abort();
+      if (started || options.signal?.aborted) return;
+      log(`agent ${label} stopped by user`);
+      options.onAgentEnd?.({ id: agentId, label, phase: assignedPhase, result: null, status: "skipped" });
+    };
+
+    options.onAgentControl?.(agentId, stop);
+
     const run = limiter(async () => {
-      state.agentCount++;
-      const label = requestedLabel || defaultAgentLabel(assignedPhase, state.agentCount);
-      options.onAgentStart?.({ label, phase: assignedPhase, prompt: taskPrompt });
+      if (agentController.signal.aborted && !options.signal?.aborted) return null;
+      throwIfAborted();
+      started = true;
+      options.onAgentStart?.({ id: agentId, label, phase: assignedPhase, prompt: taskPrompt });
+
       try {
         throwIfAborted();
         const result = await agentRunner.run(taskPrompt, {
+          agentId: `a${agentId}`,
           label,
           schema: normalizedOptions.schema,
-          signal: options.signal,
+          signal: combinedSignal,
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
-        } as any);
+          onEvent: (event: AgentRunEvent) => {
+            options.onAgentEvent?.(agentId, event);
+          },
+        });
         throwIfAborted();
         state.spent += estimateTokens(result);
-        options.onAgentEnd?.({ label, phase: assignedPhase, result });
+
+        // Check if stopped by user
+        if (agentController.signal.aborted && !options.signal?.aborted) {
+          log(`agent ${label} stopped by user`);
+          options.onAgentEnd?.({
+            id: agentId,
+            label,
+            phase: assignedPhase,
+            result: null,
+            status: "skipped",
+          });
+          return null;
+        }
+
+        options.onAgentEnd?.({
+          id: agentId,
+          label,
+          phase: assignedPhase,
+          result,
+          status: "done",
+        });
         return result;
       } catch (error) {
+        if (agentController.signal.aborted && !options.signal?.aborted) {
+          // User-stopped, not workflow abort
+          log(`agent ${label} stopped by user`);
+          options.onAgentEnd?.({
+            id: agentId,
+            label,
+            phase: assignedPhase,
+            result: null,
+            status: "skipped",
+          });
+          return null;
+        }
         if (options.signal?.aborted) throw error;
         log(`agent ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
-        options.onAgentEnd?.({ label, phase: assignedPhase, result: null });
+        options.onAgentEnd?.({
+          id: agentId,
+          label,
+          phase: assignedPhase,
+          result: null,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
         return null;
       }
     });
