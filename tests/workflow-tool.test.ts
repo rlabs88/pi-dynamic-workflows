@@ -165,10 +165,7 @@ test("a stop from /workflows throws ✘ Stopped in … followed by the user-stop
       makeCtx(),
     ),
     (error: Error) => {
-      assert.match(
-        error.message,
-        /^✘ Stopped in \d+s · 1 agents · 0 tokens\nWorkflow was stopped by the user from \/workflows$/,
-      );
+      assert.match(error.message, /^✘ Stopped in \d+s · 1 agents · 0 tokens\nWorkflow was stopped by the user$/);
       return true;
     },
   );

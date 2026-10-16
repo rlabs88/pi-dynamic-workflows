@@ -44,7 +44,7 @@ The model will write a workflow script and call the `workflow` tool. Live progre
     #3 ✓ final summary
 ```
 
-Press `Esc` to cancel a running workflow. Active subagents are aborted and the tool row shows `✘ Stopped in …`.
+Workflows run in the background on both pi and omp. The `workflow` tool returns at once, the turn continues, and new messages are never held up; several runs can be live at the same time. When a run finishes, its result arrives as a `<task-notification>` message (status, summary, result capped at 8000 characters, failures, usage). An idle session starts a turn for it. A busy one receives it after its current tool calls finish, without cancelling them (pi `steer`, omp `aside`). Esc on the main turn does not stop a background run; press `x` on its footer row or in `/workflows` (`✘ Stopped in …`). A user stop is noted quietly for the next turn instead of waking the agent. Ending or switching the session stops its background runs and drops their notifications. Without a UI (print or json mode) the tool waits for the run and returns the result directly, because the process exits after the turn.
 
 ### Drill-down view
 
@@ -218,7 +218,7 @@ user prompt
   → each agent() spawns an in-memory subagent session
   → session events (tool calls, text, usage) feed the run store
   → the tool row, status line, and /workflows view render from the store
-  → final structured result returned to the parent assistant
+  → the tool returns at once; the run's final result reaches the parent as a <task-notification> message
 ```
 
 Subagents run in fresh in-memory sessions with the standard coding tools, so they can read files, run shell commands, and call structured output exactly like a normal turn. On omp each subagent registers under its own agent id, so parallel subagents do not replace each other.
@@ -232,6 +232,7 @@ Subagents run in fresh in-memory sessions with the standard coding tools, so the
 | `src/agent.ts` | `WorkflowAgent`, an in-memory subagent runner, and the session event mapper. |
 | `src/cursor-backend.ts` | Cursor SDK backend: lazily loads `@cursor/sdk` and maps its run messages to agent events. |
 | `src/run-store.ts` | In-memory run store: per-agent prompt, tool calls, output, tokens, status; stop controls. |
+| `src/workflow-notify.ts` | Background run notifications: the `<task-notification>` body, delivery choice (wake, or quiet for a user stop), the result size cap, the session teardown, and the message row. |
 | `src/workflow-view.ts` | The `/workflows` drill-down view: pure renderer, key reducer, and TUI component. |
 | `src/workflow-footer.ts` | The status rows below the prompt: `↓` selects a running workflow, `enter` opens it, `x` stops it. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |

@@ -24,6 +24,7 @@ export {
   renderWorkflowLines,
   renderWorkflowText,
 } from "./display.js";
+export { isOmpHost } from "./model-selector.js";
 export type {
   AgentRecord,
   AgentStatus,
@@ -44,6 +45,19 @@ export type {
 } from "./workflow.js";
 export { parseWorkflowScript, runWorkflow } from "./workflow.js";
 export { installWorkflowFooter } from "./workflow-footer.js";
+export type {
+  FinishedStatus,
+  NotificationDelivery,
+  RunOutcome,
+  WorkflowNotificationDetails,
+  WorkflowNotificationMessage,
+  WorkflowNotifier,
+} from "./workflow-notify.js";
+export {
+  endWorkflowSession,
+  renderWorkflowNotification,
+  WORKFLOW_NOTIFICATION_TYPE,
+} from "./workflow-notify.js";
 export type { WorkflowToolInput, WorkflowToolOptions } from "./workflow-tool.js";
 export { createWorkflowTool } from "./workflow-tool.js";
 export { openWorkflowsView } from "./workflow-view.js";

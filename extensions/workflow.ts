@@ -1,9 +1,39 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createWorkflowTool, installWorkflowFooter, openWorkflowsView, workflowRuns } from "../src/index.js";
+import {
+  createWorkflowTool,
+  endWorkflowSession,
+  installWorkflowFooter,
+  isOmpHost,
+  type NotificationDelivery,
+  openWorkflowsView,
+  renderWorkflowNotification,
+  WORKFLOW_NOTIFICATION_TYPE,
+  type WorkflowNotificationDetails,
+  type WorkflowNotificationMessage,
+  type WorkflowNotifier,
+  workflowRuns,
+} from "../src/index.js";
+
+// pi's typings omit omp's "aside" delivery; this is the only place that widens it.
+type SendOptions = { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" };
+
+// omp fires `session_switch`, which pi's typings omit.
+interface OmpSessionEvents {
+  on(event: "session_switch", handler: () => void): void;
+}
 
 export default function extension(pi: ExtensionAPI) {
-  const workflowTool = createWorkflowTool();
+  const notifier: WorkflowNotifier = {
+    notify(message: WorkflowNotificationMessage, delivery: NotificationDelivery) {
+      pi.sendMessage(message, delivery as unknown as SendOptions);
+    },
+  };
+  const workflowTool = createWorkflowTool({ notifier });
   pi.registerTool(workflowTool);
+
+  pi.registerMessageRenderer<WorkflowNotificationDetails>(WORKFLOW_NOTIFICATION_TYPE, (message, { expanded }, theme) =>
+    renderWorkflowNotification(message.details, expanded, theme),
+  );
 
   let disposeFooter: (() => void) | undefined;
 
@@ -17,6 +47,12 @@ export default function extension(pi: ExtensionAPI) {
     disposeFooter?.();
     disposeFooter = installWorkflowFooter(ui, workflowRuns, (runId) => openWorkflowsView(ui, workflowRuns, runId));
   });
+
+  // Background runs belong to the session that launched them; tear them down with it.
+  pi.on("session_shutdown", () => endWorkflowSession());
+  if (isOmpHost()) {
+    (pi as unknown as OmpSessionEvents).on("session_switch", () => endWorkflowSession());
+  }
 
   // Register /workflows command
   pi.registerCommand("workflows", {

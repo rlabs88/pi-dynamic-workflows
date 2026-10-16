@@ -1,5 +1,5 @@
-import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { defineTool, type Theme, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { type Component, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { AgentRunEvent, WorkflowAgent } from "./agent.js";
 import {
@@ -15,6 +15,15 @@ import {
 import { formatDuration, formatTokens, isAgentFinished } from "./format.js";
 import { type AgentRecord, type AgentStatus, type RunRecord, workflowRuns } from "./run-store.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
+import {
+  buildWorkflowNotification,
+  type FinishedStatus,
+  notificationDelivery,
+  type RunOutcome,
+  settleBackgroundRun,
+  trackBackgroundRun,
+  type WorkflowNotifier,
+} from "./workflow-notify.js";
 
 const workflowToolSchema = Type.Object({
   script: Type.String({
@@ -48,6 +57,8 @@ export interface WorkflowToolOptions {
   concurrency?: number;
   /** Subagent runner; defaults to a session-backed WorkflowAgent. */
   agent?: Pick<WorkflowAgent, "run">;
+  /** Set when the host can message the session: runs then go to the background and notify on settle. */
+  notifier?: WorkflowNotifier;
 }
 
 export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefinition<typeof workflowToolSchema, any> {
@@ -77,6 +88,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       "For workflow, pass opts.model as a model selector. On omp it takes anything `omp --model` accepts: `provider/modelId[:thinking]`, a model name such as `grok-4.7`, or a role such as `@deepseek_flash`. On pi only exact `provider/modelId[:thinking]` selectors are accepted. An array is an ordered fallback list, e.g. `{ model: ['anthropic/claude-haiku-5-5', 'cursor/grok-4.7'] }`. Use only model ids the host lists. Omit it to follow omp's task model routing: `task.agentModelOverrides` for the agentType, else for `task`, else the parent session's model.",
       "For workflow, pass opts.backend: 'cursor' to run one agent as a Cursor SDK local agent, with opts.model as a Cursor model id (for example `composer-2.5` or `grok-4.7`; a `cursor/` prefix is optional). Use opts.modelParams for Cursor model parameters. Omit backend to use the host session.",
       "For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.",
+      "For workflow, in an interactive session the tool returns at once with `Workflow launched in background` and a task id while the run continues; several workflows may run at the same time. Continue other work or end your turn. The result arrives later as a `<task-notification>` message with <status>, <summary>, <result>, <failures> and <usage>; never poll, sleep, or call /workflows to wait for it, and never invent results before that message arrives. Without a UI (print or json mode) the tool waits and returns the result directly.",
     ],
     parameters: workflowToolSchema,
     prepareArguments(args) {
@@ -85,17 +97,26 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const script = normalizeWorkflowScript(params.script);
       const parsed = parseWorkflowScript(script);
+      // Background runs ignore the turn's signal, so Esc on the main turn leaves them running.
+      // Without a UI (print/json modes) the process exits after the turn, so the run stays in the foreground.
+      const notifier = ctx.hasUI === false ? undefined : options.notifier;
+      const hostSignal = notifier ? undefined : signal;
 
       const runController = new AbortController();
       const runId = workflowRuns.startRun(parsed.meta, runController);
+      if (notifier) trackBackgroundRun(runId);
 
       // Combine host signal with run's controller so "x" in the view stops the run
-      const combinedSignal = signal
-        ? (AbortSignal.any?.([signal, runController.signal]) ?? runController.signal)
+      const combinedSignal = hostSignal
+        ? (AbortSignal.any?.([hostSignal, runController.signal]) ?? runController.signal)
         : runController.signal;
 
       let snapshot: WorkflowSnapshot = createWorkflowSnapshot(parsed.meta);
-      const display = createToolUpdateWorkflowDisplay(onUpdate, undefined, workflowDisplayOptions);
+      const display = createToolUpdateWorkflowDisplay(
+        notifier ? undefined : onUpdate,
+        undefined,
+        workflowDisplayOptions,
+      );
       const findRun = () => workflowRuns.list().find((r) => r.id === runId);
 
       const syncSnapshotAgents = () => {
@@ -109,108 +130,153 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         display.update(snapshot);
       };
 
-      const statusLineFor = (word: "Completed" | "Failed" | "Stopped", durationMs: number) => {
-        const agents = findRun()?.agents ?? [];
-        const tokens = agents.reduce((s, a) => s + a.tokens, 0);
-        const icon = word === "Completed" ? "✔" : "✘";
-        return `${icon} ${word} in ${formatDuration(durationMs)} · ${agents.length} agents · ${formatTokens(tokens)} tokens`;
-      };
-
-      const fail = (word: "Failed" | "Stopped", message: string): Error => {
+      const settleFailure = (status: "failed" | "stopped", error: string): RunOutcome => {
         const durationMs = Date.now() - (findRun()?.startedAt ?? Date.now());
-        workflowRuns.finishRun(runId, word === "Stopped" ? "stopped" : "failed", message);
+        workflowRuns.finishRun(runId, status, error);
         syncSnapshotAgents();
         snapshot.durationMs = durationMs;
         display.complete(snapshot);
-        return new Error(`${statusLineFor(word, durationMs)}\n${message}${agentErrorSection(snapshot.logs)}`);
+        return {
+          status,
+          runId,
+          name: parsed.meta.name,
+          durationMs,
+          agents: findRun()?.agents ?? [],
+          failures: agentErrorSection(snapshot.logs),
+          error,
+        };
       };
 
-      let result: WorkflowRunResult;
-      try {
-        result = await runWorkflow(script, {
-          cwd: options.cwd ?? ctx.cwd,
-          args: params.args,
-          signal: combinedSignal,
-          concurrency: options.concurrency,
-          agent: options.agent,
+      const settleCompleted = (run: WorkflowRunResult): RunOutcome => {
+        workflowRuns.finishRun(runId, "completed");
+        syncSnapshotAgents();
+        snapshot.result = run.result;
+        snapshot.durationMs = run.durationMs;
+        display.complete(snapshot);
+        return {
+          status: "completed",
           runId,
-          session: {
-            modelRegistry: ctx.modelRegistry,
-            model: ctx.model,
-          },
-          onLog(message) {
-            workflowRuns.log(runId, message);
-            snapshot.logs.push(message);
-            update();
-          },
-          onPhase(title) {
-            workflowRuns.phase(runId, title);
-            snapshot.currentPhase = title;
-            if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
-            update();
-          },
-          onAgentQueued(event) {
-            workflowRuns.agentQueued(runId, event);
-            update();
-          },
-          onAgentStart(event) {
-            workflowRuns.agentStarted(runId, event.id, { prompt: event.prompt });
-            update();
-          },
-          onAgentEvent(id, event: AgentRunEvent) {
-            workflowRuns.agentEvent(runId, id, event);
-          },
-          onAgentEnd(event) {
-            workflowRuns.agentEnded(runId, event.id, {
-              status: event.status,
-              result: event.result,
-              error: event.error,
-            });
-            update();
-          },
-          onAgentControl(id, stop) {
-            workflowRuns.registerAgentStop(runId, id, stop);
-          },
-        });
-      } catch (error) {
-        if (combinedSignal.aborted || isAbortError(error)) {
-          const byUser = runController.signal.aborted && !signal?.aborted;
-          throw fail("Stopped", byUser ? "Workflow was stopped by the user from /workflows" : "Workflow was aborted");
+          name: run.meta.name,
+          durationMs: run.durationMs,
+          agents: findRun()?.agents ?? [],
+          failures: agentErrorSection(run.logs),
+          run,
+        };
+      };
+
+      const done = (async (): Promise<RunOutcome> => {
+        let run: WorkflowRunResult;
+        try {
+          run = await runWorkflow(script, {
+            cwd: options.cwd ?? ctx.cwd,
+            args: params.args,
+            signal: combinedSignal,
+            concurrency: options.concurrency,
+            agent: options.agent,
+            runId,
+            session: {
+              modelRegistry: ctx.modelRegistry,
+              model: ctx.model,
+            },
+            onLog(message) {
+              workflowRuns.log(runId, message);
+              snapshot.logs.push(message);
+              update();
+            },
+            onPhase(title) {
+              workflowRuns.phase(runId, title);
+              snapshot.currentPhase = title;
+              if (!snapshot.phases.includes(title)) snapshot.phases.push(title);
+              update();
+            },
+            onAgentQueued(event) {
+              workflowRuns.agentQueued(runId, event);
+              update();
+            },
+            onAgentStart(event) {
+              workflowRuns.agentStarted(runId, event.id, { prompt: event.prompt });
+              update();
+            },
+            onAgentEvent(id, event: AgentRunEvent) {
+              workflowRuns.agentEvent(runId, id, event);
+            },
+            onAgentEnd(event) {
+              workflowRuns.agentEnded(runId, event.id, {
+                status: event.status,
+                result: event.result,
+                error: event.error,
+              });
+              update();
+            },
+            onAgentControl(id, stop) {
+              workflowRuns.registerAgentStop(runId, id, stop);
+            },
+          });
+        } catch (error) {
+          if (combinedSignal.aborted || isAbortError(error)) {
+            const byUser = runController.signal.aborted && !hostSignal?.aborted;
+            return settleFailure("stopped", byUser ? "Workflow was stopped by the user" : "Workflow was aborted");
+          }
+          // Errors thrown inside the script's vm context are not `instanceof Error` here
+          return settleFailure(
+            "failed",
+            isRecord(error) && typeof error.message === "string" ? error.message : String(error),
+          );
         }
-        // Errors thrown inside the script's vm context are not `instanceof Error` here
-        throw fail("Failed", isRecord(error) && typeof error.message === "string" ? error.message : String(error));
+
+        if (run.agentCount === 0) {
+          return settleFailure(
+            "failed",
+            "workflow scripts must call agent() at least once; this workflow declared phases but did not run any subagents",
+          );
+        }
+        return settleCompleted(run);
+      })();
+
+      if (notifier) {
+        // The run settles after this turn ends; its notification is delivered then.
+        void done
+          .then((outcome) => {
+            if (!settleBackgroundRun(runId)) return;
+            notifier.notify(buildWorkflowNotification(outcome), notificationDelivery(outcome.status));
+          })
+          // Delivery is best-effort: the session may already be gone.
+          .catch(() => undefined);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Workflow launched in background. Task ID: ${runId} (${parsed.meta.name}). You will be notified when it completes. Use /workflows to watch live progress. Do not poll or wait for it.`,
+            },
+          ],
+          details: { runId, background: true },
+        };
       }
 
-      if (result.agentCount === 0) {
-        throw fail(
-          "Failed",
-          "workflow scripts must call agent() at least once; this workflow declared phases but did not run any subagents",
+      const outcome = await done;
+      if (outcome.status !== "completed") {
+        throw new Error(
+          `${doneLine(outcome.status, outcome.durationMs, outcome.agents)}\n${outcome.error}${outcome.failures}`,
         );
       }
 
-      workflowRuns.finishRun(runId, "completed");
-      syncSnapshotAgents();
-      snapshot.result = result.result;
-      snapshot.durationMs = result.durationMs;
-      display.complete(snapshot);
-
-      const statusLine = statusLineFor("Completed", result.durationMs);
-
+      const run = outcome.run;
+      const line = doneLine("completed", outcome.durationMs, outcome.agents);
       return {
         content: [
           {
             type: "text",
-            text: `${statusLine}\n\nWorkflow ${result.meta.name} completed with ${result.agentCount} agent(s).\n\nResult:\n${JSON.stringify(result.result, null, 2)}${agentErrorSection(result.logs)}`,
+            text: `${line}\n\nWorkflow ${run.meta.name} completed with ${run.agentCount} agent(s).\n\nResult:\n${JSON.stringify(run.result, null, 2)}${outcome.failures}`,
           },
         ],
         details: {
           ...snapshot,
-          statusLine,
-          meta: result.meta,
-          phases: result.phases,
-          logs: result.logs,
-          result: result.result,
-          durationMs: result.durationMs,
+          statusLine: line,
+          meta: run.meta,
+          phases: run.phases,
+          logs: run.logs,
+          result: run.result,
+          durationMs: run.durationMs,
         },
       };
     },
@@ -219,6 +285,9 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
     },
     renderResult(result, { isPartial }, theme) {
       const details: unknown = result.details;
+      if (isRecord(details) && details.background === true && typeof details.runId === "string") {
+        return new BackgroundRunRow(details.runId, theme);
+      }
       const snap = toRenderSnapshot(details);
       if (snap) {
         const lines = renderWorkflowLines(snap, workflowDisplayOptions);
@@ -233,6 +302,41 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       return new Text(text?.type === "text" ? text.text : theme.fg("muted", "workflow"), 0, 0);
     },
   });
+}
+
+/** Tool row for a background run: live text while it runs, then its final status line. */
+class BackgroundRunRow implements Component {
+  private readonly runId: string;
+  private readonly theme: Theme;
+
+  constructor(runId: string, theme: Theme) {
+    this.runId = runId;
+    this.theme = theme;
+  }
+
+  render(width: number): string[] {
+    const run = workflowRuns.list().find((r) => r.id === this.runId);
+    let text: string;
+    if (run === undefined) {
+      text = this.theme.fg("muted", "Background workflow finished");
+    } else if (run.status === "running") {
+      text = this.theme.fg("muted", "Running in background · /workflows to monitor and save");
+    } else {
+      text = doneLine(run.status, (run.endedAt ?? Date.now()) - run.startedAt, run.agents);
+    }
+    return new Text(text, 0, 0).render(width);
+  }
+
+  invalidate(): void {}
+}
+
+const finishedWord: Record<FinishedStatus, string> = { completed: "Completed", failed: "Failed", stopped: "Stopped" };
+const finishedIcon: Record<FinishedStatus, string> = { completed: "✔", failed: "✘", stopped: "✘" };
+
+/** Done line shared by the foreground result and the background tool row. */
+function doneLine(status: FinishedStatus, durationMs: number, agents: readonly AgentRecord[]): string {
+  const tokens = agents.reduce((s, a) => s + a.tokens, 0);
+  return `${finishedIcon[status]} ${finishedWord[status]} in ${formatDuration(durationMs)} · ${agents.length} agents · ${formatTokens(tokens)} tokens`;
 }
 
 /** Footer line for a running run. Every finished agent status counts as done. */
