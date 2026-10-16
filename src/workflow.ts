@@ -3,6 +3,7 @@ import type { Node } from "acorn";
 import { parse } from "acorn";
 import type { TSchema } from "typebox";
 import { type AgentRunEvent, WorkflowAgent, type WorkflowAgentOptions } from "./agent.js";
+import { CursorSdkAgent } from "./cursor-backend.js";
 
 export interface WorkflowMetaPhase {
   title: string;
@@ -20,6 +21,8 @@ export interface WorkflowMeta {
 export interface WorkflowRunOptions extends WorkflowAgentOptions {
   args?: unknown;
   agent?: Pick<WorkflowAgent, "run">;
+  /** Runners for `backend` values other than the host. Tests inject fakes here. */
+  backends?: { cursor?: Pick<WorkflowAgent, "run"> };
   concurrency?: number;
   tokenBudget?: number | null;
   signal?: AbortSignal;
@@ -58,6 +61,10 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   model?: string | readonly string[];
   isolation?: "worktree";
   agentType?: string;
+  /** `"cursor"` runs the subagent as a Cursor SDK local agent; omit for the host session. */
+  backend?: "cursor";
+  /** Cursor model parameters, such as reasoning effort. Requires `backend: "cursor"`. */
+  modelParams?: Record<string, string>;
 }
 
 interface RuntimeState {
@@ -80,7 +87,14 @@ export async function runWorkflow<T = unknown>(
   const started = Date.now();
   const { meta, body } = parseWorkflowScript(script);
   const state: RuntimeState = { logs: [], phases: [], agentCount: 0, spent: 0 };
-  const agentRunner = options.agent ?? new WorkflowAgent({ ...options, runId: options.runId });
+  const hostAgent = options.agent ?? new WorkflowAgent({ ...options, runId: options.runId });
+  let cursorAgent: Pick<WorkflowAgent, "run"> | undefined;
+  const runnerFor = (backend: AgentOptions["backend"]): Pick<WorkflowAgent, "run"> => {
+    if (backend !== "cursor") return hostAgent;
+    if (options.backends?.cursor) return options.backends.cursor;
+    cursorAgent ??= new CursorSdkAgent({ cwd: options.cwd, instructions: options.instructions });
+    return cursorAgent;
+  };
   const concurrency = Math.max(
     1,
     Math.min(options.concurrency ?? Math.max(1, (globalThis.navigator?.hardwareConcurrency ?? 8) - 2), 16),
@@ -152,12 +166,13 @@ export async function runWorkflow<T = unknown>(
 
       try {
         throwIfAborted();
-        const result = await agentRunner.run(taskPrompt, {
+        const result = await runnerFor(normalizedOptions.backend).run(taskPrompt, {
           agentId: `a${agentId}`,
           label,
           schema: normalizedOptions.schema,
           signal: combinedSignal,
           model: normalizedOptions.model,
+          modelParams: normalizedOptions.modelParams,
           onNotice: (message: string) => log(`agent ${label}: ${message}`),
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           onEvent: (event: AgentRunEvent) => {
@@ -512,14 +527,41 @@ function optionalModel(value: unknown): string | readonly string[] | undefined {
   return value.map((selector: unknown) => requireNonEmpty(selector, "agent model"));
 }
 
+function optionalBackend(value: unknown): "cursor" | undefined {
+  if (value === undefined || value === "cursor") return value;
+  throw new TypeError(
+    `unsupported agent backend ${JSON.stringify(value)}; supported: "cursor" (omit for the host session)`,
+  );
+}
+
+function optionalModelParams(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("agent modelParams must be an object of string values");
+  }
+  const params: Record<string, string> = {};
+  for (const [name, param] of Object.entries(value)) {
+    if (typeof param !== "string") throw new TypeError(`agent modelParams.${name} must be a string`);
+    params[name] = param;
+  }
+  return params;
+}
+
 function normalizeAgentOptions(value: unknown): AgentOptions {
   if (!value || typeof value !== "object") throw new TypeError("agent options must be an object");
   const options = value as AgentOptions;
+  const backend = optionalBackend(options.backend);
+  const modelParams = optionalModelParams(options.modelParams);
+  if (backend === undefined && modelParams !== undefined) {
+    throw new TypeError('agent modelParams require backend: "cursor"');
+  }
   return {
     ...options,
     label: optionalString(options.label, "agent label"),
     phase: optionalString(options.phase, "agent phase"),
     model: optionalModel(options.model),
+    backend,
+    modelParams,
     isolation: options.isolation,
     agentType: optionalString(options.agentType, "agent type"),
   };

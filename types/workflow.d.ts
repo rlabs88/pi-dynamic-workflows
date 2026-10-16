@@ -36,6 +36,10 @@ declare global {
      * On pi: exact `provider/modelId[:thinking]` only. An array is an ordered fallback list.
      */
     model?: string | readonly string[];
+    /** Run the subagent as a Cursor SDK local agent. `model` then takes Cursor model ids. Omit to use the host session. */
+    backend?: "cursor";
+    /** Cursor model parameters, such as `{ effort: "high" }`. Requires `backend: "cursor"`. */
+    modelParams?: Record<string, string>;
     /** Requested isolation mode. */
     isolation?: "worktree";
     /** Requested subagent role/type. */

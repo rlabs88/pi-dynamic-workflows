@@ -73,6 +73,8 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   instructions?: string;
   /** Subagent model: a `provider/modelId[:thinking]` selector, a model name, or an omp role. Arrays are fallbacks. */
   model?: string | readonly string[];
+  /** Cursor backend only: model parameters such as reasoning effort. Other backends reject it. */
+  modelParams?: Record<string, string>;
   signal?: AbortSignal;
   /** Event subscription for the agent's lifecycle. */
   onEvent?: (event: AgentRunEvent) => void;
@@ -199,6 +201,33 @@ function throwIfTurnFailed(turn: TurnEnd | undefined): void {
   throw new Error(turn.errorMessage?.trim() ? turn.errorMessage : "Model request failed");
 }
 
+/**
+ * The prompt a subagent receives. Every backend builds it here, so a run reads the same on each.
+ * Instructions come first, then the task label, the task, and the structured output contract.
+ */
+export function buildSubagentPrompt(
+  prompt: string,
+  options: { instructions: readonly (string | undefined)[]; label?: string; structured: boolean },
+): string {
+  const parts = [...options.instructions, options.label ? `Task label: ${options.label}` : undefined, prompt].filter(
+    Boolean,
+  );
+
+  if (options.structured) {
+    parts.push(
+      [
+        "Final output contract:",
+        "- Your final action MUST be a structured_output tool call.",
+        "- The structured_output arguments are the return value of this subagent.",
+        "- Do not emit a prose final answer instead of structured_output.",
+        "- If you need to inspect files or run commands first, do so, then call structured_output exactly once.",
+      ].join("\n"),
+    );
+  }
+
+  return parts.join("\n\n");
+}
+
 // ── WorkflowAgent ──────────────────────────────────────────
 
 export class WorkflowAgent {
@@ -235,7 +264,11 @@ export class WorkflowAgent {
 
     const agentId = options.agentId ?? `a${++this.agentCounter}`;
 
-    const fullPrompt = this.buildPrompt(prompt, options, Boolean(options.schema));
+    const fullPrompt = buildSubagentPrompt(prompt, {
+      instructions: [this.instructions, options.instructions],
+      label: options.label,
+      structured: Boolean(options.schema),
+    });
     const agentDir = getAgentDir();
     const sessionOpts = this.sessionOptionsFor(options.model, {
       cwd: this.cwd,
@@ -324,33 +357,6 @@ export class WorkflowAgent {
     const override: WorkflowSessionOptions = { ...base, ...this.sessionOptions, model: selected.model };
     if (selected.thinkingLevel) override.thinkingLevel = selected.thinkingLevel;
     return override;
-  }
-
-  private buildPrompt(
-    prompt: string,
-    options: Pick<AgentRunOptions, "instructions" | "label">,
-    structured: boolean,
-  ): string {
-    const parts = [
-      this.instructions,
-      options.instructions,
-      options.label ? `Task label: ${options.label}` : undefined,
-      prompt,
-    ].filter(Boolean);
-
-    if (structured) {
-      parts.push(
-        [
-          "Final output contract:",
-          "- Your final action MUST be a structured_output tool call.",
-          "- The structured_output arguments are the return value of this subagent.",
-          "- Do not emit a prose final answer instead of structured_output.",
-          "- If you need to inspect files or run commands first, do so, then call structured_output exactly once.",
-        ].join("\n"),
-      );
-    }
-
-    return parts.join("\n\n");
   }
 
   private lastAssistantText(messages: readonly unknown[]): string {

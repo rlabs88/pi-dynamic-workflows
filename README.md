@@ -193,6 +193,19 @@ const verdict = await agent('Check the release notes.', {
 
 Use only model ids the host lists. If no selector resolves, that agent returns `null` and the run log names the failure. Omit `model` to use the parent session's model.
 
+### Cursor backend
+
+`opts.backend: "cursor"` runs that subagent as a local Cursor SDK agent instead of the host session. `opts.model` takes Cursor model ids such as `composer-2.5` or `grok-4.7` (the `cursor/` prefix is optional), and an array is an ordered fallback list. `opts.modelParams` is an object of string values forwarded to the Cursor model, such as `{ effort: 'high' }`; it is rejected unless `backend` is `"cursor"`. Set `CURSOR_API_KEY` for the Cursor SDK. `@cursor/sdk` loads on the first Cursor agent, so host-only runs do not pay for it. Cursor agents report through the same run store, so their rows and cards appear in `/workflows` like any other agent.
+
+```js
+const check = await agent('Describe the exports of math.js.', {
+  label: 'cursor check',
+  backend: 'cursor',
+  model: 'grok-4.7',
+  modelParams: { effort: 'high' },
+})
+```
+
 ## How it works
 
 ```text
@@ -215,6 +228,7 @@ Subagents run in fresh in-memory sessions with the standard coding tools, so the
 | `src/workflow.ts` | AST-validated parser and sandboxed workflow runtime. |
 | `src/workflow-tool.ts` | The `workflow` tool: prompt guidelines, tool row rendering, status line, abort handling. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory subagent runner, and the session event mapper. |
+| `src/cursor-backend.ts` | Cursor SDK backend: lazily loads `@cursor/sdk` and maps its run messages to agent events. |
 | `src/run-store.ts` | In-memory run store: per-agent prompt, tool calls, output, tokens, status; stop controls. |
 | `src/workflow-view.ts` | The `/workflows` drill-down view: pure renderer, key reducer, and TUI component. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |

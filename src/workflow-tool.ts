@@ -75,6 +75,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       "For workflow, include a final synthesis/assertion agent when combining multiple subagent results; return a compact JSON-serializable value with ok/verdict plus the important outputs.",
       "For workflow, if agent() needs machine-readable output, pass a plain JSON Schema via opts.schema; agent() will return the validated object. Use JSON Schema syntax, not TypeScript or TypeBox constructors.",
       "For workflow, pass opts.model as a model selector. On omp it takes anything `omp --model` accepts: `provider/modelId[:thinking]`, a model name such as `grok-4.7`, or a role such as `@deepseek_flash`. On pi only exact `provider/modelId[:thinking]` selectors are accepted. An array is an ordered fallback list, e.g. `{ model: ['anthropic/claude-haiku-5-5', 'cursor/grok-4.7'] }`. Use only model ids the host lists. Omit it to use the parent session's model.",
+      "For workflow, pass opts.backend: 'cursor' to run one agent as a Cursor SDK local agent, with opts.model as a Cursor model id (for example `composer-2.5` or `grok-4.7`; a `cursor/` prefix is optional). Use opts.modelParams for Cursor model parameters. Omit backend to use the host session.",
       "For workflow, do not assume the parent assistant has repository code context inside subagents; include enough task context and relevant paths in each agent prompt.",
     ],
     parameters: workflowToolSchema,

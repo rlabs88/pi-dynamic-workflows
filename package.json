@@ -53,6 +53,7 @@
   "author": "michaelliv",
   "license": "MIT",
   "dependencies": {
+    "@cursor/sdk": "^1.0.37",
     "acorn": "^8.16.0"
   },
   "peerDependencies": {
