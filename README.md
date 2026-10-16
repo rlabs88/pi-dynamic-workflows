@@ -54,6 +54,8 @@ While a workflow runs, a status line below the editor shows its progress:
 ◯ e2e_drill  ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱  2/3 · 35s · ↓ 26.0k tokens
 ```
 
+Each running workflow has a row in that footer. Press `↓` on an empty prompt to select a row: `enter` opens the run's detail (one `esc` returns to the prompt), `x` stops it, and `esc` clears the selection. `↑` on the first row also clears it. Any other key clears the selection and passes through, and so does typing text or opening autocomplete. The footer is hidden when no run is running.
+
 Open `/workflows` or press `ctrl+alt+w` (during or after a run) to browse runs. The view opens on the run list, or directly on the run when there is only one. Drill down from phases to agents to one agent's card. Captured from a live pi session (one agent was stopped with `x`):
 
 ```text
@@ -231,6 +233,7 @@ Subagents run in fresh in-memory sessions with the standard coding tools, so the
 | `src/cursor-backend.ts` | Cursor SDK backend: lazily loads `@cursor/sdk` and maps its run messages to agent events. |
 | `src/run-store.ts` | In-memory run store: per-agent prompt, tool calls, output, tokens, status; stop controls. |
 | `src/workflow-view.ts` | The `/workflows` drill-down view: pure renderer, key reducer, and TUI component. |
+| `src/workflow-footer.ts` | The status rows below the prompt: `↓` selects a running workflow, `enter` opens it, `x` stops it. |
 | `src/structured-output.ts` | Terminating structured-output tool backed by TypeBox/JSON Schema. |
 | `src/display.ts` | Workflow snapshots and compact text renderers. |
 | `src/format.ts` | Shared duration and token formatting, and the "agent finished" rule used by every surface. |

@@ -120,6 +120,17 @@ Single column: the selected level fills the width with a title row and a
 
 Bare keys only. Keys pressed with ctrl or meta are ignored [obs].
 
+Footer below the editor (one row per running run; shown only while a run runs) [code]:
+
+- `↓` with an empty, unautocompleted prompt selects the first row. `↑` `↓` move
+  the selection; `↓` clamps at the last row, and `↑` on the first row clears it.
+- `enter` opens the selected run in the `/workflows` detail, and `esc` from that
+  detail closes the view instead of showing the run list; `x` stops the run and
+  keeps the selection; `esc` clears the selection.
+- Any other key clears the selection and passes through to the prompt. Typing
+  text or opening autocomplete also hands the keys back. Kitty key-release
+  events are ignored, so a press is never undone by its release.
+
 ## 5. Stop and failure
 
 - Stopping a run: the header shows `· stopped`; unfinished agents show `◌` and
@@ -137,7 +148,7 @@ Claude Code writes run snapshots and per-agent JSONL transcripts under
 | Item | Status in this fork |
 |---|---|
 | Tool row: running, done, stopped, failed | Implemented. Upstream's phase tree is kept as the running display and gains a `/workflows` hint. |
-| Status line below the editor with the 20-cell bar | Implemented. |
+| Status line below the editor with the 20-cell bar | Implemented as one footer widget below the editor with a row per running run. `↓` on an empty prompt browses the rows (§4) [code]. |
 | `/workflows` list, auto-open when one run, empty state | Implemented. |
 | `ctrl+alt+w` shortcut for `/workflows` | Addition: Claude Code has no key for it; `/workflows` works on both hosts while the tool is running. |
 | Detail levels phases → agents → agent, split ≥ 64 cols, narrow single column | Implemented. |

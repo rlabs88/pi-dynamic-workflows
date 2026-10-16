@@ -109,32 +109,6 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         display.update(snapshot);
       };
 
-      let statusTimer: ReturnType<typeof setInterval> | undefined;
-      let unsubscribeStatus: (() => void) | undefined;
-      const statusKey = `workflow-status-${runId}`;
-      const startStatusWidget = () => {
-        if (ctx.hasUI === false || !ctx.ui) return;
-        const updateStatus = () => {
-          const run = findRun();
-          if (run?.status !== "running") return;
-          ctx.ui.setWidget(statusKey, [formatRunStatusLine(run)], { placement: "belowEditor" });
-        };
-        updateStatus();
-        statusTimer = setInterval(updateStatus, 1000);
-        unsubscribeStatus = workflowRuns.subscribe(updateStatus);
-      };
-      const clearStatusWidget = () => {
-        unsubscribeStatus?.();
-        unsubscribeStatus = undefined;
-        if (statusTimer !== undefined) {
-          clearInterval(statusTimer);
-          statusTimer = undefined;
-        }
-        if (ctx.hasUI !== false && ctx.ui) {
-          ctx.ui.setWidget(statusKey, undefined);
-        }
-      };
-
       const statusLineFor = (word: "Completed" | "Failed" | "Stopped", durationMs: number) => {
         const agents = findRun()?.agents ?? [];
         const tokens = agents.reduce((s, a) => s + a.tokens, 0);
@@ -150,8 +124,6 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         display.complete(snapshot);
         return new Error(`${statusLineFor(word, durationMs)}\n${message}${agentErrorSection(snapshot.logs)}`);
       };
-
-      startStatusWidget();
 
       let result: WorkflowRunResult;
       try {
@@ -201,7 +173,6 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           },
         });
       } catch (error) {
-        clearStatusWidget();
         if (combinedSignal.aborted || isAbortError(error)) {
           const byUser = runController.signal.aborted && !signal?.aborted;
           throw fail("Stopped", byUser ? "Workflow was stopped by the user from /workflows" : "Workflow was aborted");
@@ -209,8 +180,6 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         // Errors thrown inside the script's vm context are not `instanceof Error` here
         throw fail("Failed", isRecord(error) && typeof error.message === "string" ? error.message : String(error));
       }
-
-      clearStatusWidget();
 
       if (result.agentCount === 0) {
         throw fail(
@@ -266,7 +235,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
   });
 }
 
-/** Status widget line for a running run. Every finished agent status counts as done. */
+/** Footer line for a running run. Every finished agent status counts as done. */
 export function formatRunStatusLine(run: RunRecord, now = Date.now()): string {
   const total = run.agents.length;
   const done = run.agents.filter((a) => isAgentFinished(a.status)).length;

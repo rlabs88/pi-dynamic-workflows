@@ -1,15 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createWorkflowTool, openWorkflowsView, workflowRuns } from "../src/index.js";
+import { createWorkflowTool, installWorkflowFooter, openWorkflowsView, workflowRuns } from "../src/index.js";
 
 export default function extension(pi: ExtensionAPI) {
   const workflowTool = createWorkflowTool();
   pi.registerTool(workflowTool);
 
-  pi.on("session_start", () => {
+  let disposeFooter: (() => void) | undefined;
+
+  pi.on("session_start", (_event, ctx) => {
     const active = pi.getActiveTools();
     if (!active.includes(workflowTool.name)) {
       pi.setActiveTools([...active, workflowTool.name]);
     }
+    const ui = ctx.ui;
+    if (ctx.hasUI === false || !ui) return;
+    disposeFooter?.();
+    disposeFooter = installWorkflowFooter(ui, workflowRuns, (runId) => openWorkflowsView(ui, workflowRuns, runId));
   });
 
   // Register /workflows command

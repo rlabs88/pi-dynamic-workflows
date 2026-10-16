@@ -43,6 +43,7 @@ export type {
   WorkflowRunResult,
 } from "./workflow.js";
 export { parseWorkflowScript, runWorkflow } from "./workflow.js";
+export { installWorkflowFooter } from "./workflow-footer.js";
 export type { WorkflowToolInput, WorkflowToolOptions } from "./workflow-tool.js";
 export { createWorkflowTool } from "./workflow-tool.js";
 export { openWorkflowsView } from "./workflow-view.js";

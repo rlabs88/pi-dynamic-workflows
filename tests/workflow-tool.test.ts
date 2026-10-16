@@ -8,9 +8,8 @@ type Tool = ToolDefinition;
 
 const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as unknown as Theme;
 
-function makeCtx(onWidget?: (lines: string[] | undefined) => void): ExtensionContext {
-  const ui = { setWidget: (_key: string, lines: string[] | undefined) => onWidget?.(lines) };
-  return { cwd: process.cwd(), hasUI: onWidget !== undefined, ui } as unknown as ExtensionContext;
+function makeCtx(): ExtensionContext {
+  return { cwd: process.cwd(), hasUI: false } as unknown as ExtensionContext;
 }
 
 function toolWith(run: (prompt: string) => Promise<string>): Tool {
@@ -149,43 +148,6 @@ test("status line counts finished agents (not stopped ones) as done and says tok
     agents: [agent(1, "done", 1500), agent(2, "skipped"), agent(3, "stopped"), agent(4, "failed"), agent(5, "running")],
   };
   assert.equal(formatRunStatusLine(run, 5000), "◯ wf  ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱  3/5 · 5s · ↓ 1.5k tokens");
-});
-
-test("status widget updates on store changes, not only on the 1 s timer", async (t) => {
-  // The interval never fires: every line shown comes from a store notification.
-  t.mock.timers.enable({ apis: ["setInterval"] });
-  const gate = Promise.withResolvers<void>();
-  const shown: string[] = [];
-  const tool = toolWith(async (p) => {
-    if (p === "slow") await gate.promise;
-    return p;
-  });
-  const done = tool.execute(
-    "id",
-    { script: `${header("live_status")}return await parallel([() => agent('fast'), () => agent('slow')])` },
-    undefined,
-    undefined,
-    makeCtx((lines) => {
-      for (const line of lines ?? []) {
-        shown.push(line);
-        if (line.includes(" 1/2 ")) gate.resolve();
-      }
-    }),
-  );
-  await done;
-  assert.ok(
-    shown.some((line) => line.includes(" 1/2 ")),
-    shown.join("\n"),
-  );
-});
-
-test("the status widget key is per run: workflow-status-<runId>", async () => {
-  const keys = new Set<string>();
-  const ui = { setWidget: (key: string) => keys.add(key) };
-  const ctx = { cwd: process.cwd(), hasUI: true, ui } as unknown as ExtensionContext;
-  const tool = toolWith(async (p) => p);
-  await tool.execute("id", { script: `${header("keyed")}return await agent('x')` }, undefined, undefined, ctx);
-  assert.deepEqual([...keys], [`workflow-status-${workflowRuns.list()[0].id}`]);
 });
 
 test("a stop from /workflows throws ✘ Stopped in … followed by the user-stop message", async () => {

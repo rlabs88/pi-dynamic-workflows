@@ -16,6 +16,8 @@ export interface ViewState {
   cardScroll: number;
   expanded: boolean;
   agentFilter?: AgentStatus;
+  /** Opened on one run (from the footer): leaving its detail closes the view instead of showing the run list. */
+  closeOnBack?: boolean;
 }
 
 /** Terminal area the view renders into; lets the reducer clamp card scrolling. */
@@ -260,6 +262,7 @@ function reducePhasesKey(
     }
     case "escape":
     case "left":
+      if (state.closeOnBack) return { state, action: { type: "close" } };
       return {
         state: {
           ...state,
@@ -1126,7 +1129,7 @@ function isWorkflowViewTheme(value: unknown): value is WorkflowViewTheme {
   );
 }
 
-function themeStyle(theme: unknown): WorkflowViewStyle {
+export function themeStyle(theme: unknown): WorkflowViewStyle {
   if (!isWorkflowViewTheme(theme)) return PLAIN_STYLE;
   return {
     selected: (s) => theme.fg("accent", s),
@@ -1138,18 +1141,20 @@ function themeStyle(theme: unknown): WorkflowViewStyle {
   };
 }
 
-function initialViewState(runs: readonly RunRecord[]): ViewState {
+function initialViewState(runs: readonly RunRecord[], runId?: string): ViewState {
   const first = runs[0];
+  const requested = runId === undefined ? undefined : runs.find((run) => run.id === runId);
   return {
-    // Opens straight into the detail when exactly one run exists.
-    mode: runs.length === 1 ? "detail" : "list",
-    selectedRunId: first?.id ?? "",
+    // Opens straight into the detail when a run is requested or exactly one run exists.
+    mode: requested !== undefined || runs.length === 1 ? "detail" : "list",
+    selectedRunId: requested?.id ?? first?.id ?? "",
     level: "phases",
     selectedPhaseIndex: 0,
     selectedAgentId: undefined,
     cardScroll: 0,
     expanded: false,
     agentFilter: undefined,
+    closeOnBack: requested !== undefined,
   };
 }
 
@@ -1164,10 +1169,11 @@ export function createWorkflowViewComponent(
   source: WorkflowRunSource,
   theme: unknown,
   done: (result: unknown) => void,
+  runId?: string,
 ): WorkflowViewComponent {
   const style = themeStyle(theme);
   let runs = [...source.list()];
-  let state = initialViewState(runs);
+  let state = initialViewState(runs, runId);
   let lastWidth = 80;
   let disposed = false;
 
@@ -1248,8 +1254,8 @@ export interface WorkflowViewUI {
 
 // ── Entry point ─────────────────────────────────────────────────────
 
-export function openWorkflowsView(ui: WorkflowViewUI, source: WorkflowRunSource): void {
-  ui.custom((tui, theme, _keybindings, done) => createWorkflowViewComponent(tui, source, theme, done), {
+export function openWorkflowsView(ui: WorkflowViewUI, source: WorkflowRunSource, runId?: string): void {
+  ui.custom((tui, theme, _keybindings, done) => createWorkflowViewComponent(tui, source, theme, done, runId), {
     overlay: false,
   }).catch(() => {
     // Fire-and-forget: the host cancels the view on teardown.

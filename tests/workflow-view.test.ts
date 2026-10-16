@@ -557,6 +557,36 @@ test("one run auto-opens the detail in the component's initial state", () => {
   component.dispose();
 });
 
+test("a requested run id opens that run's detail even when several runs exist", () => {
+  const component = createWorkflowViewComponent(
+    { requestRender: () => {} },
+    fakeSource([run("wf_1"), run("wf_2")]),
+    undefined,
+    () => {},
+    "wf_2",
+  );
+  const lines = component.render(80);
+  assert.ok(lines.some((l) => l.includes("Description for wf_2")));
+  assert.ok(!lines.some((l) => l.includes("Dynamic workflows")));
+  component.dispose();
+});
+
+test("escape from a requested run's detail closes the view instead of opening the run list", () => {
+  let closed = 0;
+  const component = createWorkflowViewComponent(
+    { requestRender: () => {} },
+    fakeSource([run("wf_1"), run("wf_2")]),
+    undefined,
+    () => {
+      closed++;
+    },
+    "wf_2",
+  );
+  component.handleInput("\x1b");
+  assert.equal(closed, 1);
+  component.dispose();
+});
+
 test("dispose unsubscribes and stops the tick", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let renders = 0;
