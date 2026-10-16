@@ -10,7 +10,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Static, TSchema } from "typebox";
-import { isOmpHost, resolveAgentModel } from "./model-selector.js";
+import { isOmpHost, readTaskModelOverrides, resolveAgentModel, routedModelSelector } from "./model-selector.js";
 import { createStructuredOutputTool, type StructuredOutputCapture } from "./structured-output.js";
 
 // ── Event types ────────────────────────────────────────────
@@ -41,6 +41,10 @@ export interface WorkflowAgentOptions {
   createSession?: WorkflowSessionFactory;
   /** Model selection path. Defaults to the detected host; tests set it explicitly. */
   host?: AgentHost;
+  /**
+   * `task.agentModelOverrides` used when a run sets no model. Defaults to the settings files; tests set it to skip them.
+   */
+  agentModelOverrides?: Record<string, string>;
 }
 
 /** The subset of an agent session the runner uses. */
@@ -59,6 +63,8 @@ export type WorkflowSessionOptions = CreateAgentSessionOptions & {
   agentId?: string;
   taskDepth?: number;
   modelPattern?: string | string[];
+  /** omp shows this name in Agent Hub; pi ignores it. */
+  agentDisplayName?: string;
 };
 
 export type WorkflowSessionFactory = (
@@ -67,6 +73,8 @@ export type WorkflowSessionFactory = (
 
 export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefined> {
   agentId?: string;
+  /** Requested subagent type. With no `model`, picks the matching `task.agentModelOverrides` entry (omp settings). */
+  agentType?: string;
   label?: string;
   schema?: TSchemaDef;
   tools?: ToolDefinition[];
@@ -238,6 +246,7 @@ export class WorkflowAgent {
   private readonly runId?: string;
   private readonly createSession: WorkflowSessionFactory;
   private readonly host: AgentHost;
+  private readonly agentModelOverrides: Record<string, string>;
   private readonly instanceId = randomUUID();
   private agentCounter = 0;
 
@@ -249,6 +258,8 @@ export class WorkflowAgent {
     this.runId = options.runId;
     this.createSession = options.createSession ?? createAgentSession;
     this.host = options.host ?? (isOmpHost() ? "omp" : "pi");
+    this.agentModelOverrides =
+      options.agentModelOverrides ?? readTaskModelOverrides(SettingsManager.create(this.cwd, getAgentDir()));
   }
 
   async run<TSchemaDef extends TSchema | undefined = undefined>(
@@ -270,7 +281,8 @@ export class WorkflowAgent {
       structured: Boolean(options.schema),
     });
     const agentDir = getAgentDir();
-    const sessionOpts = this.sessionOptionsFor(options.model, {
+    const selector = options.model ?? routedModelSelector(this.agentModelOverrides, options.agentType);
+    const sessionOpts = this.sessionOptionsFor(selector, {
       cwd: this.cwd,
       agentDir,
       sessionManager: SessionManager.inMemory(this.cwd),
@@ -280,11 +292,12 @@ export class WorkflowAgent {
       // pi ignores extra keys, omp uses them for subagent identity
       agentId: `wf-${this.runId ?? this.instanceId}-${agentId}`,
       taskDepth: 1,
+      agentDisplayName: options.label,
     });
 
     const created = await this.createSession(sessionOpts);
     const { session } = created;
-    if (this.host === "omp" && options.model !== undefined) {
+    if (this.host === "omp" && selector !== undefined) {
       if (session.model === undefined) {
         session.dispose();
         throw new Error(created.modelFallbackMessage ?? "Host created a session without a model");

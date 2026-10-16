@@ -169,6 +169,7 @@ export async function runWorkflow<T = unknown>(
         const result = await runnerFor(normalizedOptions.backend).run(taskPrompt, {
           agentId: `a${agentId}`,
           label,
+          agentType: normalizedOptions.agentType,
           schema: normalizedOptions.schema,
           signal: combinedSignal,
           model: normalizedOptions.model,

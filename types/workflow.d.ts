@@ -34,6 +34,7 @@ declare global {
     /**
      * Subagent model. On omp: anything `omp --model` accepts (`provider/modelId[:thinking]`, a model name, or a role).
      * On pi: exact `provider/modelId[:thinking]` only. An array is an ordered fallback list.
+     * Omitted: omp's `task.agentModelOverrides` entry for `agentType` (then `task`), else the parent session's model.
      */
     model?: string | readonly string[];
     /** Run the subagent as a Cursor SDK local agent. `model` then takes Cursor model ids. Omit to use the host session. */
@@ -42,7 +43,7 @@ declare global {
     modelParams?: Record<string, string>;
     /** Requested isolation mode. */
     isolation?: "worktree";
-    /** Requested subagent role/type. */
+    /** Requested subagent role/type. On omp, with no `model`, selects its `task.agentModelOverrides` entry. */
     agentType?: string;
   }
 

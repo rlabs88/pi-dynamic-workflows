@@ -191,7 +191,7 @@ const verdict = await agent('Check the release notes.', {
 })
 ```
 
-Use only model ids the host lists. If no selector resolves, that agent returns `null` and the run log names the failure. Omit `model` to use the parent session's model.
+Use only model ids the host lists. If no selector resolves, that agent returns `null` and the run log names the failure. Omit `model` to follow omp's `task.agentModelOverrides` routing: the entry for `agentType` (its name after the last `:` too), then the `task` entry. With no matching entry, the parent session's model is used. An explicit `model` always wins.
 
 ### Cursor backend
 

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { type AgentRunEvent, WorkflowAgent, type WorkflowSession, type WorkflowSessionOptions } from "../src/agent.js";
-import { parseModelSelector, resolveAgentModel } from "../src/model-selector.js";
+import {
+  parseModelSelector,
+  readTaskModelOverrides,
+  resolveAgentModel,
+  routedModelSelector,
+} from "../src/model-selector.js";
 import { runWorkflow } from "../src/workflow.js";
 
 interface FakeModel {
@@ -329,4 +334,119 @@ return { value: await agent('x', { model: ${model} }) };`,
       model,
     );
   }
+});
+
+test("omp: with no model, the task override for the agent type is the modelPattern", async () => {
+  const seen: WorkflowSessionOptions[] = [];
+  const agent = new WorkflowAgent({
+    host: "omp",
+    tools: [],
+    session: { model: parent as never },
+    agentModelOverrides: { "quant-analyst": "@deepseek_flash", task: "@other" },
+    createSession: ompFactory(seen, haiku),
+  });
+  await agent.run("hi", { agentType: "quant:quant-analyst" });
+  assert.equal(seen[0]?.modelPattern, "@deepseek_flash");
+  assert.equal("model" in (seen[0] ?? {}), false);
+});
+
+test("omp: with no model and no matching override, no modelPattern is set", async () => {
+  const seen: WorkflowSessionOptions[] = [];
+  const agent = new WorkflowAgent({
+    host: "omp",
+    tools: [],
+    session: { model: parent as never },
+    agentModelOverrides: { reviewer: "@opus_heavy" },
+    createSession: ompFactory(seen, haiku),
+  });
+  await agent.run("hi", { agentType: "scout" });
+  assert.equal(seen[0]?.modelPattern, undefined);
+  assert.equal(seen[0]?.model, parent);
+});
+
+test("omp: an explicit model beats the task override", async () => {
+  const seen: WorkflowSessionOptions[] = [];
+  const agent = new WorkflowAgent({
+    host: "omp",
+    tools: [],
+    session: { model: parent as never },
+    agentModelOverrides: { "quant-analyst": "@deepseek_flash", task: "@other" },
+    createSession: ompFactory(seen, haiku),
+  });
+  await agent.run("hi", { agentType: "quant:quant-analyst", model: "cursor/grok-4.7" });
+  assert.equal(seen[0]?.modelPattern, "cursor/grok-4.7");
+});
+
+test("workflow: on omp an agentType with no model routes through the task overrides", async () => {
+  const seen: WorkflowSessionOptions[] = [];
+  const agent = new WorkflowAgent({
+    host: "omp",
+    tools: [],
+    session: { model: parent as never },
+    agentModelOverrides: { "quant-analyst": "@deepseek_flash" },
+    createSession: ompFactory(seen, haiku),
+  });
+  const result = await runWorkflow(
+    `export const meta = { name: 'routed_agent_type', description: 'agent type routing' };
+return { value: await agent('x', { agentType: 'quant:quant-analyst' }) };`,
+    { agent },
+  );
+  assert.equal(JSON.stringify(result.result), JSON.stringify({ value: "done" }));
+  assert.equal(seen[0]?.modelPattern, "@deepseek_flash");
+});
+
+test("workflow: agent() passes agentType through to the runner", async () => {
+  const seen: unknown[] = [];
+  const runner = {
+    async run(_prompt: string, opts?: unknown) {
+      seen.push(opts);
+      return "ok";
+    },
+  };
+  await runWorkflow(
+    `export const meta = { name: 'pass_agent_type', description: 'agent type pass-through' };
+return { value: await agent('x', { agentType: 'quant:quant-analyst' }) };`,
+    { agent: runner },
+  );
+  const first = seen[0];
+  assert.ok(typeof first === "object" && first !== null && "agentType" in first);
+  assert.equal(first.agentType, "quant:quant-analyst");
+});
+
+test("agentDisplayName: the run label is the session's display name", async () => {
+  const seen: WorkflowSessionOptions[] = [];
+  const agent = new WorkflowAgent({
+    host: "pi",
+    tools: [],
+    session: { model: parent as never },
+    createSession: recordingFactory(seen),
+  });
+  await agent.run("hi", { label: "quant" });
+  assert.equal(seen[0]?.agentDisplayName, "quant");
+});
+
+test("routedModelSelector: the agent type, then its name after the namespace, then task", () => {
+  const overrides = { "quant-analyst": "@quant", task: "@task", "quant:quant": "@exact" };
+  assert.equal(routedModelSelector(overrides, "quant:quant-analyst"), "@quant");
+  assert.equal(routedModelSelector(overrides, "quant:quant"), "@exact");
+  assert.equal(routedModelSelector(overrides, "scout"), "@task");
+  assert.equal(routedModelSelector({}, "scout"), undefined);
+});
+
+test("readTaskModelOverrides: project entries override global ones, and malformed values are ignored", () => {
+  const overrides = readTaskModelOverrides({
+    getGlobalSettings: () => ({
+      task: { agentModelOverrides: { task: "@global", scout: "@scout", bad: 42, blank: "  " } },
+    }),
+    getProjectSettings: () => ({ task: { agentModelOverrides: { task: "@project", reviewer: "@opus" } } }),
+  });
+  assert.deepEqual(overrides, { task: "@project", scout: "@scout", reviewer: "@opus" });
+});
+
+test("readTaskModelOverrides: settings without a task section yield no overrides", () => {
+  const overrides = readTaskModelOverrides({
+    getGlobalSettings: () => ({}),
+    getProjectSettings: () => "not settings",
+  });
+  assert.deepEqual(overrides, {});
 });

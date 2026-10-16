@@ -81,3 +81,39 @@ export function resolveAgentModel<M>(
   }
   throw new Error(`No usable model: ${failures.join(", ")}`);
 }
+
+/** Reads `task.agentModelOverrides` from raw settings (unvalidated JSON). Project entries win over global ones. */
+export function readTaskModelOverrides(settings: {
+  getGlobalSettings(): unknown;
+  getProjectSettings(): unknown;
+}): Record<string, string> {
+  return { ...overridesIn(settings.getGlobalSettings()), ...overridesIn(settings.getProjectSettings()) };
+}
+
+function overridesIn(settings: unknown): Record<string, string> {
+  if (!isPlainRecord(settings) || !isPlainRecord(settings.task)) return {};
+  const raw = settings.task.agentModelOverrides;
+  if (!isPlainRecord(raw)) return {};
+  const overrides: Record<string, string> = {};
+  for (const [agent, selector] of Object.entries(raw)) {
+    if (typeof selector === "string" && selector.trim() !== "") overrides[agent] = selector.trim();
+  }
+  return overrides;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The selector omp's task router uses for a subagent: `agentType`, then its name after the last `:` (plugin-namespaced
+ * types such as `quant:quant-analyst`), then the `task` entry. Undefined when no entry matches.
+ */
+export function routedModelSelector(overrides: Record<string, string>, agentType?: string): string | undefined {
+  const names = agentType ? [agentType, agentType.split(":").pop() ?? ""] : [];
+  names.push("task");
+  for (const name of names) {
+    if (name !== "" && Object.hasOwn(overrides, name)) return overrides[name];
+  }
+  return undefined;
+}
