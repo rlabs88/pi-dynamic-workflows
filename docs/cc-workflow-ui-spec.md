@@ -153,3 +153,4 @@ Claude Code writes run snapshots and per-agent JSONL transcripts under
 | Launch permission dialog | Gap. |
 | Background execution (tool returns at once) | Gap: the tool blocks until the run ends, as upstream does. `/workflows` and the status line stay usable during the run. |
 | Disk persistence across sessions | Gap: runs are kept in memory for the session (last 10). |
+| Per-agent model | Implemented. On omp, `opts.model` is passed to omp as `modelPattern`, so it takes what `omp --model` takes (`provider/modelId[:thinking]`, a model name, or a role); an array is an ordered fallback list, and a selector omp cannot resolve fails that agent. On pi, only exact `provider/modelId[:thinking]` selectors resolve, and the first usable one wins. Omp's `max` thinking level is not selectable on pi, because the shared pi session type lacks it. |

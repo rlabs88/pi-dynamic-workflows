@@ -31,8 +31,11 @@ declare global {
     phase?: string;
     /** JSON Schema for structured output. When present, the returned value is typed as unknown unless you provide a generic. */
     schema?: TSchema;
-    /** Requested model name. Currently passed as subagent guidance. */
-    model?: string;
+    /**
+     * Subagent model. On omp: anything `omp --model` accepts (`provider/modelId[:thinking]`, a model name, or a role).
+     * On pi: exact `provider/modelId[:thinking]` only. An array is an ordered fallback list.
+     */
+    model?: string | readonly string[];
     /** Requested isolation mode. */
     isolation?: "worktree";
     /** Requested subagent role/type. */

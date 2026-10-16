@@ -91,6 +91,7 @@ test("mapper: malformed and lifecycle events produce nothing", () => {
 
 class FakeSession implements WorkflowSession {
   messages: unknown[] = [];
+  model?: { id: string };
   listeners = new Set<(event: unknown) => void>();
   constructor(private readonly reply: string) {}
   subscribe(listener: (event: unknown) => void) {
@@ -116,6 +117,7 @@ function fakeFactory(sessions: FakeSession[], options: WorkflowSessionOptions[])
   return async (opts: WorkflowSessionOptions) => {
     options.push(opts);
     const session = new FakeSession(`reply${sessions.length}`);
+    session.model = opts.model;
     sessions.push(session);
     return { session };
   };

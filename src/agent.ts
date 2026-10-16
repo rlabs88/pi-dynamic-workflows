@@ -10,6 +10,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Static, TSchema } from "typebox";
+import { isOmpHost, resolveAgentModel } from "./model-selector.js";
 import { createStructuredOutputTool, type StructuredOutputCapture } from "./structured-output.js";
 
 // ── Event types ────────────────────────────────────────────
@@ -23,6 +24,9 @@ export type AgentRunEvent =
 
 // ── Options ────────────────────────────────────────────────
 
+/** Which host runs the agent. omp resolves selectors itself (`modelPattern`); pi resolves exact selectors here. */
+export type AgentHost = "omp" | "pi";
+
 export interface WorkflowAgentOptions {
   cwd?: string;
   /** Extra tools available to the subagent in addition to the structured output tool. */
@@ -35,21 +39,31 @@ export interface WorkflowAgentOptions {
   runId?: string;
   /** Session factory; defaults to `createAgentSession`. */
   createSession?: WorkflowSessionFactory;
+  /** Model selection path. Defaults to the detected host; tests set it explicitly. */
+  host?: AgentHost;
 }
 
 /** The subset of an agent session the runner uses. */
 export interface WorkflowSession {
   readonly messages: readonly unknown[];
+  /** The model the session runs on. omp sets it after resolving `modelPattern`; undefined means no match. */
+  readonly model?: { readonly id: string };
   subscribe(listener: (event: unknown) => void): () => void;
   prompt(text: string): Promise<void>;
   abort(): Promise<void> | void;
   dispose(): void;
 }
 
-/** Session options plus the omp subagent identity keys (pi ignores them). */
-export type WorkflowSessionOptions = CreateAgentSessionOptions & { agentId?: string; taskDepth?: number };
+/** Session options plus omp-only keys (pi ignores them): subagent identity and the pattern omp resolves. */
+export type WorkflowSessionOptions = CreateAgentSessionOptions & {
+  agentId?: string;
+  taskDepth?: number;
+  modelPattern?: string | string[];
+};
 
-export type WorkflowSessionFactory = (options: WorkflowSessionOptions) => Promise<{ session: WorkflowSession }>;
+export type WorkflowSessionFactory = (
+  options: WorkflowSessionOptions,
+) => Promise<{ session: WorkflowSession; modelFallbackMessage?: string }>;
 
 export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefined> {
   agentId?: string;
@@ -57,9 +71,13 @@ export interface AgentRunOptions<TSchemaDef extends TSchema | undefined = undefi
   schema?: TSchemaDef;
   tools?: ToolDefinition[];
   instructions?: string;
+  /** Subagent model: a `provider/modelId[:thinking]` selector, a model name, or an omp role. Arrays are fallbacks. */
+  model?: string | readonly string[];
   signal?: AbortSignal;
   /** Event subscription for the agent's lifecycle. */
   onEvent?: (event: AgentRunEvent) => void;
+  /** Receives host notices, such as omp reporting that it fell back to another model. */
+  onNotice?: (message: string) => void;
 }
 
 export type AgentRunResult<TSchemaDef extends TSchema | undefined> = TSchemaDef extends TSchema
@@ -157,6 +175,7 @@ export class WorkflowAgent {
   private readonly instructions?: string;
   private readonly runId?: string;
   private readonly createSession: WorkflowSessionFactory;
+  private readonly host: AgentHost;
   private readonly instanceId = randomUUID();
   private agentCounter = 0;
 
@@ -167,6 +186,7 @@ export class WorkflowAgent {
     this.instructions = options.instructions;
     this.runId = options.runId;
     this.createSession = options.createSession ?? createAgentSession;
+    this.host = options.host ?? (isOmpHost() ? "omp" : "pi");
   }
 
   async run<TSchemaDef extends TSchema | undefined = undefined>(
@@ -182,30 +202,31 @@ export class WorkflowAgent {
 
     const agentId = options.agentId ?? `a${++this.agentCounter}`;
 
-    // Emit start event before session creation, with the full prompt
-    const fullPrompt = this.buildPrompt(prompt, options as AgentRunOptions<any>, Boolean(options.schema));
-    options.onEvent?.({
-      type: "start",
-      prompt: fullPrompt,
-      model: this.sessionOptions.model?.id,
-    });
-
+    const fullPrompt = this.buildPrompt(prompt, options, Boolean(options.schema));
     const agentDir = getAgentDir();
-
-    // omp identity fix: pass agentId and taskDepth so concurrent sessions don't collide
-    // pi ignores extra keys, omp uses them for subagent identity
-    const sessionOpts: WorkflowSessionOptions = {
+    const sessionOpts = this.sessionOptionsFor(options.model, {
       cwd: this.cwd,
       agentDir,
       sessionManager: SessionManager.inMemory(this.cwd),
       settingsManager: SettingsManager.create(this.cwd, agentDir),
       customTools,
+      // omp identity fix: pass agentId and taskDepth so concurrent sessions don't collide
+      // pi ignores extra keys, omp uses them for subagent identity
       agentId: `wf-${this.runId ?? this.instanceId}-${agentId}`,
       taskDepth: 1,
-      ...this.sessionOptions,
-    };
+    });
 
-    const { session } = await this.createSession(sessionOpts);
+    const created = await this.createSession(sessionOpts);
+    const { session } = created;
+    if (this.host === "omp" && options.model !== undefined) {
+      if (session.model === undefined) {
+        session.dispose();
+        throw new Error(created.modelFallbackMessage ?? "Host created a session without a model");
+      }
+      if (created.modelFallbackMessage) options.onNotice?.(created.modelFallbackMessage);
+    }
+
+    options.onEvent?.({ type: "start", prompt: fullPrompt, model: session.model?.id });
 
     let removeAbortListener: (() => void) | undefined;
     let unsubscribe: (() => void) | undefined;
@@ -247,7 +268,36 @@ export class WorkflowAgent {
     }
   }
 
-  private buildPrompt(prompt: string, options: AgentRunOptions<any>, structured: boolean): string {
+  private resolveModel(selectors: string | readonly string[]) {
+    const registry = this.sessionOptions.modelRegistry;
+    if (registry === undefined) throw new Error("Model selection needs a modelRegistry");
+    return resolveAgentModel(selectors, registry);
+  }
+
+  /**
+   * Session options for one run. pi resolves the selector now and sets `model`; omp receives it as `modelPattern`
+   * and drops the parent's `model`, so omp's own resolution decides.
+   */
+  private sessionOptionsFor(
+    model: string | readonly string[] | undefined,
+    base: WorkflowSessionOptions,
+  ): WorkflowSessionOptions {
+    if (model === undefined) return { ...base, ...this.sessionOptions };
+    if (this.host === "omp") {
+      const { model: _parentModel, ...inherited } = this.sessionOptions;
+      return { ...base, ...inherited, modelPattern: typeof model === "string" ? model : [...model] };
+    }
+    const selected = this.resolveModel(model);
+    const override: WorkflowSessionOptions = { ...base, ...this.sessionOptions, model: selected.model };
+    if (selected.thinkingLevel) override.thinkingLevel = selected.thinkingLevel;
+    return override;
+  }
+
+  private buildPrompt(
+    prompt: string,
+    options: Pick<AgentRunOptions, "instructions" | "label">,
+    structured: boolean,
+  ): string {
     const parts = [
       this.instructions,
       options.instructions,

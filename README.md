@@ -178,6 +178,21 @@ const finding = await agent('Find security-sensitive files.', {
 
 Under the hood this is a Pi `structured_output` tool with `terminate: true`, so the subagent ends on that call without an extra assistant turn.
 
+### Choosing models
+
+On omp, `opts.model` takes whatever `omp --model` takes: `provider/modelId[:thinking]`, a model name such as `grok-4.7`, or a role such as `@deepseek_flash`. Omp resolves it the same way it resolves its own flag. An array is an ordered fallback list: the first entry that resolves to a model with credentials is used.
+
+On pi, only exact `provider/modelId[:thinking]` entries are accepted. Thinking levels are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+
+```js
+const verdict = await agent('Check the release notes.', {
+  label: 'release check',
+  model: ['anthropic/claude-haiku-5-5', 'cursor/grok-4.7'],
+})
+```
+
+Use only model ids the host lists. If no selector resolves, that agent returns `null` and the run log names the failure. Omit `model` to use the parent session's model.
+
 ## How it works
 
 ```text

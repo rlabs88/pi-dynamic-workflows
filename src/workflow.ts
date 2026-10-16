@@ -55,7 +55,7 @@ export interface AgentOptions<TSchemaDef extends TSchema | undefined = TSchema |
   label?: string;
   phase?: string;
   schema?: TSchemaDef;
-  model?: string;
+  model?: string | readonly string[];
   isolation?: "worktree";
   agentType?: string;
 }
@@ -157,6 +157,8 @@ export async function runWorkflow<T = unknown>(
           label,
           schema: normalizedOptions.schema,
           signal: combinedSignal,
+          model: normalizedOptions.model,
+          onNotice: (message: string) => log(`agent ${label}: ${message}`),
           instructions: buildAgentInstructions(assignedPhase, normalizedOptions),
           onEvent: (event: AgentRunEvent) => {
             options.onAgentEvent?.(agentId, event);
@@ -497,6 +499,19 @@ function optionalString(value: unknown, name: string): string | undefined {
   return requireString(value, name);
 }
 
+function requireNonEmpty(value: unknown, name: string): string {
+  const text = requireString(value, name);
+  if (text.length === 0) throw new TypeError(`${name} must not be empty`);
+  return text;
+}
+
+function optionalModel(value: unknown): string | readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return requireNonEmpty(value, "agent model");
+  if (value.length === 0) throw new TypeError("agent model list must not be empty");
+  return value.map((selector: unknown) => requireNonEmpty(selector, "agent model"));
+}
+
 function normalizeAgentOptions(value: unknown): AgentOptions {
   if (!value || typeof value !== "object") throw new TypeError("agent options must be an object");
   const options = value as AgentOptions;
@@ -504,7 +519,7 @@ function normalizeAgentOptions(value: unknown): AgentOptions {
     ...options,
     label: optionalString(options.label, "agent label"),
     phase: optionalString(options.phase, "agent phase"),
-    model: optionalString(options.model, "agent model"),
+    model: optionalModel(options.model),
     isolation: options.isolation,
     agentType: optionalString(options.agentType, "agent type"),
   };
@@ -530,7 +545,6 @@ function buildAgentInstructions(phase: string | undefined, options: AgentOptions
   if (phase) lines.push(`Workflow phase: ${phase}`);
   if (options.agentType) lines.push(`Act as workflow subagent type: ${options.agentType}`);
   if (options.isolation) lines.push(`Requested isolation: ${options.isolation}`);
-  if (options.model) lines.push(`Requested model: ${options.model}`);
   return lines.length ? lines.join("\n") : undefined;
 }
 
