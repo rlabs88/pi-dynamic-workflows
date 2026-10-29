@@ -10,8 +10,8 @@ import {
 } from "../src/agent.js";
 import { runWorkflow } from "../src/workflow.js";
 
-function assistantEnd(usage: unknown, model?: string) {
-  return { type: "message_end", message: { role: "assistant", model, usage, stopReason: "stop", content: [] } };
+function assistantEnd(usage: unknown, model?: string, content: unknown = []) {
+  return { type: "message_end", message: { role: "assistant", model, usage, stopReason: "stop", content } };
 }
 
 test("mapper: text deltas accumulate per assistant message and reset on the next one", () => {
@@ -44,16 +44,40 @@ test("mapper: toolcall stream events produce nothing (tool_execution_start is th
 
 test("mapper: assistant message_end yields usage with model; user message_end yields nothing", () => {
   const map = createSessionEventMapper();
-  assert.deepEqual(map(assistantEnd({ totalTokens: 100 }, "m-1")), [{ type: "usage", tokens: 100, model: "m-1" }]);
+  assert.deepEqual(map(assistantEnd({ totalTokens: 100 }, "m-1")), [
+    { type: "usage", tokens: 100, ioTokens: 100, model: "m-1" },
+  ]);
   assert.deepEqual(map({ type: "message_end", message: { role: "user", content: [] } }), []);
+});
+
+test("mapper: ioTokens leaves out cache reads that omp's totalTokens includes", () => {
+  const map = createSessionEventMapper();
+  assert.deepEqual(map(assistantEnd({ input: 12, output: 30, cacheRead: 432_000, totalTokens: 432_042 }, "m")), [
+    { type: "usage", tokens: 432_042, ioTokens: 42, model: "m" },
+  ]);
+});
+
+test("mapper: an assistant message with text emits message before usage; thinking and empty text emit none", () => {
+  const map = createSessionEventMapper();
+  const content = [
+    { type: "thinking", thinking: "hmm" },
+    { type: "text", text: "There are " },
+    { type: "text", text: "12 packages." },
+  ];
+  assert.deepEqual(map(assistantEnd({ totalTokens: 9 }, undefined, content)), [
+    { type: "message", text: "There are 12 packages." },
+    { type: "usage", tokens: 9, ioTokens: 9 },
+  ]);
+  assert.deepEqual(map(assistantEnd(undefined, undefined, [{ type: "text", text: "  " }])), []);
+  assert.deepEqual(map(assistantEnd(undefined, undefined, [{ type: "thinking", thinking: "x" }])), []);
 });
 
 test("mapper: token count never becomes NaN and a missing model is omitted", () => {
   const map = createSessionEventMapper();
-  assert.deepEqual(map(assistantEnd({ input: 3, output: 4 })), [{ type: "usage", tokens: 7 }]);
+  assert.deepEqual(map(assistantEnd({ input: 3, output: 4 })), [{ type: "usage", tokens: 7, ioTokens: 7 }]);
   assert.deepEqual(map(assistantEnd({ totalTokens: "x" })), []);
   assert.deepEqual(map({ type: "message_end", message: { role: "assistant", model: 42, usage: { totalTokens: 5 } } }), [
-    { type: "usage", tokens: 5 },
+    { type: "usage", tokens: 5, ioTokens: 5 },
   ]);
 });
 

@@ -32,6 +32,8 @@ export interface AgentRecord {
   lastProgressAt?: number;
   /** Sum of reported usage across the agent's assistant messages. */
   tokens: number;
+  /** Sum of input and output tokens only; omp's `tokens` also counts cache reads. */
+  ioTokens: number;
   /** Most recent MAX_TOOL_CALLS calls, oldest first. */
   toolCalls: ToolCallRecord[];
   /** Total calls, including ones dropped from toolCalls. */
@@ -60,7 +62,11 @@ export interface RunRecord {
   /** Ordered by id. */
   agents: AgentRecord[];
   error?: string;
+  /** Set with status "stopped": a user stop, or the session ending under the run. */
+  stopReason?: StopReason;
 }
+
+export type StopReason = "user" | "aborted";
 
 /** Read and control surface the drill-down view consumes. */
 export interface WorkflowRunSource {
@@ -221,6 +227,7 @@ export class WorkflowRunStore implements WorkflowRunSource {
       promptPreview: capString(opts.prompt, FIELD_CAP).value,
       queuedAt: Date.now(),
       tokens: 0,
+      ioTokens: 0,
       toolCalls: [],
       toolCallCount: 0,
       text: "",
@@ -296,9 +303,12 @@ export class WorkflowRunStore implements WorkflowRunSource {
       }
       case "usage": {
         agent.tokens += event.tokens;
+        agent.ioTokens += event.ioTokens ?? event.tokens;
         if (event.model) agent.model = event.model;
         break;
       }
+      case "message":
+        break;
       case "start": {
         if (this.findRun(runId)?.status !== "running" || (agent.status !== "queued" && agent.status !== "running")) {
           break;
@@ -331,12 +341,13 @@ export class WorkflowRunStore implements WorkflowRunSource {
   /**
    * Finish a run with the given status.
    */
-  finishRun(runId: string, status: RunStatus, error?: string): void {
+  finishRun(runId: string, status: RunStatus, error?: string, stopReason?: StopReason): void {
     const run = this.findRun(runId);
     if (!run) return;
     run.status = status;
     run.endedAt = Date.now();
     if (error) run.error = error;
+    if (status === "stopped" && stopReason !== undefined) run.stopReason = stopReason;
 
     // Mark queued/running agents as stopped
     const now = Date.now();

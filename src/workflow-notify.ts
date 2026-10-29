@@ -171,6 +171,11 @@ export function trackBackgroundRun(runId: string): void {
   backgroundRuns.set(runId, sessionGeneration);
 }
 
+/** True while a background run launched in the current session is unsettled; false once the session ended under it. */
+export function isBackgroundRunTracked(runId: string): boolean {
+  return backgroundRuns.get(runId) === sessionGeneration;
+}
+
 /** Called once a background run settles. True when the run should notify: it is still tracked and its session is current. */
 export function settleBackgroundRun(runId: string): boolean {
   const launchedIn = backgroundRuns.get(runId);

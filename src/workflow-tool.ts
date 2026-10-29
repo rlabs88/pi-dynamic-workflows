@@ -13,11 +13,13 @@ import {
   type WorkflowSnapshot,
 } from "./display.js";
 import { formatDuration, formatTokens, isAgentFinished } from "./format.js";
-import { type AgentRecord, type AgentStatus, type RunRecord, workflowRuns } from "./run-store.js";
+import { ProgressSink, readProgressRoot } from "./progress-file.js";
+import { type AgentRecord, type AgentStatus, type RunRecord, type StopReason, workflowRuns } from "./run-store.js";
 import { parseWorkflowScript, runWorkflow, type WorkflowRunResult } from "./workflow.js";
 import {
   buildWorkflowNotification,
   type FinishedStatus,
+  isBackgroundRunTracked,
   notificationDelivery,
   type RunOutcome,
   settleBackgroundRun,
@@ -106,6 +108,22 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       const runId = workflowRuns.startRun(parsed.meta, runController);
       if (notifier) trackBackgroundRun(runId);
 
+      // The host asked for progress files (T3_WORKFLOW_PROGRESS_DIR): mirror the run there.
+      const progressRoot = readProgressRoot();
+      let progress: ProgressSink | undefined;
+      if (progressRoot !== undefined) {
+        const created = ProgressSink.create({
+          root: progressRoot,
+          store: workflowRuns,
+          runId,
+          script,
+          onStopRequested: () => workflowRuns.stopRun(runId),
+        });
+        if ("sink" in created) progress = created.sink;
+        else workflowRuns.log(runId, `progress files disabled: ${created.error}`);
+      }
+      const launchDetails = progress?.launchDetails();
+
       // Combine host signal with run's controller so "x" in the view stops the run
       const combinedSignal = hostSignal
         ? (AbortSignal.any?.([hostSignal, runController.signal]) ?? runController.signal)
@@ -130,9 +148,9 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
         display.update(snapshot);
       };
 
-      const settleFailure = (status: "failed" | "stopped", error: string): RunOutcome => {
+      const settleFailure = (status: "failed" | "stopped", error: string, stopReason?: StopReason): RunOutcome => {
         const durationMs = Date.now() - (findRun()?.startedAt ?? Date.now());
-        workflowRuns.finishRun(runId, status, error);
+        workflowRuns.finishRun(runId, status, error, stopReason);
         syncSnapshotAgents();
         snapshot.durationMs = durationMs;
         display.complete(snapshot);
@@ -148,6 +166,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
       };
 
       const settleCompleted = (run: WorkflowRunResult): RunOutcome => {
+        progress?.setResult(run.result);
         workflowRuns.finishRun(runId, "completed");
         syncSnapshotAgents();
         snapshot.result = run.result;
@@ -194,13 +213,16 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
               update();
             },
             onAgentStart(event) {
+              progress?.agentStarted(event.id, event.prompt);
               workflowRuns.agentStarted(runId, event.id, { prompt: event.prompt });
               update();
             },
             onAgentEvent(id, event: AgentRunEvent) {
+              progress?.agentEvent(id, event);
               workflowRuns.agentEvent(runId, id, event);
             },
             onAgentEnd(event) {
+              progress?.agentEnded(event.id, { status: event.status, result: event.result, error: event.error });
               workflowRuns.agentEnded(runId, event.id, {
                 status: event.status,
                 result: event.result,
@@ -214,8 +236,14 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           });
         } catch (error) {
           if (combinedSignal.aborted || isAbortError(error)) {
-            const byUser = runController.signal.aborted && !hostSignal?.aborted;
-            return settleFailure("stopped", byUser ? "Workflow was stopped by the user" : "Workflow was aborted");
+            // A background run whose session ended is no longer tracked: that is an abort, not a user stop.
+            const sessionEnded = notifier !== undefined && !isBackgroundRunTracked(runId);
+            const byUser = runController.signal.aborted && !hostSignal?.aborted && !sessionEnded;
+            return settleFailure(
+              "stopped",
+              byUser ? "Workflow was stopped by the user" : "Workflow was aborted",
+              byUser ? "user" : "aborted",
+            );
           }
           // Errors thrown inside the script's vm context are not `instanceof Error` here
           return settleFailure(
@@ -249,7 +277,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
               text: `Workflow launched in background. Task ID: ${runId} (${parsed.meta.name}). You will be notified when it completes. Use /workflows to watch live progress. Do not poll or wait for it.`,
             },
           ],
-          details: { runId, background: true },
+          details: { runId, background: true, ...launchDetails },
         };
       }
 
@@ -277,6 +305,7 @@ export function createWorkflowTool(options: WorkflowToolOptions = {}): ToolDefin
           logs: run.logs,
           result: run.result,
           durationMs: run.durationMs,
+          ...launchDetails,
         },
       };
     },
