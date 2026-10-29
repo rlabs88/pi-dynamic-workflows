@@ -20,7 +20,14 @@ export type AgentRunEvent =
   | { type: "text"; text: string }
   | { type: "tool_start"; id: string; name: string; args: unknown }
   | { type: "tool_end"; id: string; name: string; result: string; isError: boolean }
-  | { type: "usage"; tokens: number; model?: string };
+  | { type: "message"; text: string }
+  | {
+      type: "usage";
+      tokens: number;
+      /** Input plus output only; `tokens` also counts cache reads on omp. Defaults to `tokens`. */
+      ioTokens?: number;
+      model?: string;
+    };
 
 // ── Options ────────────────────────────────────────────────
 
@@ -115,6 +122,21 @@ function usageTokens(usage: unknown): number {
   return (num(usage.input) ?? 0) + (num(usage.output) ?? 0);
 }
 
+/** Input plus output tokens; the total when the usage object splits neither (omp's total includes cache reads). */
+function ioUsageTokens(usage: unknown): number {
+  if (!isRecord(usage)) return 0;
+  const input = num(usage.input);
+  const output = num(usage.output);
+  if (input === undefined && output === undefined) return num(usage.totalTokens) ?? 0;
+  return (input ?? 0) + (output ?? 0);
+}
+
+/** The text blocks of an assistant message, joined. */
+function messageText(message: Record<string, unknown>): string {
+  if (typeof message.content === "string") return message.content;
+  return resultText(message);
+}
+
 function resultText(result: unknown): string {
   if (!isRecord(result) || !Array.isArray(result.content)) return "";
   const parts: string[] = [];
@@ -153,10 +175,18 @@ export function createSessionEventMapper(): (event: unknown) => AgentRunEvent[] 
       case "message_end": {
         const message = event.message;
         if (!isRecord(message) || message.role !== "assistant") return [];
+        const events: AgentRunEvent[] = [];
+        const text = messageText(message);
+        if (text.trim()) events.push({ type: "message", text });
         const tokens = usageTokens(message.usage);
-        if (tokens <= 0) return [];
-        const model = str(message.model);
-        return [model === undefined ? { type: "usage", tokens } : { type: "usage", tokens, model }];
+        if (tokens > 0) {
+          const ioTokens = ioUsageTokens(message.usage);
+          const model = str(message.model);
+          events.push(
+            model === undefined ? { type: "usage", tokens, ioTokens } : { type: "usage", tokens, ioTokens, model },
+          );
+        }
+        return events;
       }
       case "tool_execution_start": {
         const id = str(event.toolCallId);

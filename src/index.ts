@@ -26,10 +26,22 @@ export {
 } from "./display.js";
 export { isOmpHost } from "./model-selector.js";
 export type {
+  WireAgent,
+  WireAgentState,
+  WireProgress,
+  WireRunStatus,
+  WireStopReason,
+  WireTranscriptBody,
+  WireTranscriptLine,
+  WorkflowLaunchDetailsAddition,
+} from "./progress-file.js";
+export { T3_WORKFLOW_PROGRESS_DIR_ENV, WORKFLOW_PROGRESS_SCHEMA_VERSION } from "./progress-file.js";
+export type {
   AgentRecord,
   AgentStatus,
   RunRecord,
   RunStatus,
+  StopReason,
   ToolCallRecord,
   WorkflowRunSource,
 } from "./run-store.js";

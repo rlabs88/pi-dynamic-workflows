@@ -223,6 +223,10 @@ user prompt
 
 Subagents run in fresh in-memory sessions with the standard coding tools, so they can read files, run shell commands, and call structured output exactly like a normal turn. On omp each subagent registers under its own agent id, so parallel subagents do not replace each other.
 
+## Progress files for t3code
+
+A host that cannot watch the in-memory run store, such as t3code driving `omp --mode rpc`, can set `T3_WORKFLOW_PROGRESS_DIR` to a directory. The extension then writes each run's progress snapshot, normalized script and per-agent transcripts there, and watches for a `stop` file to stop the run. With the variable unset nothing is written and nothing else changes. See [docs/t3-progress-contract.md](docs/t3-progress-contract.md) for the format.
+
 ## Library modules
 
 | File | Purpose |
@@ -231,6 +235,7 @@ Subagents run in fresh in-memory sessions with the standard coding tools, so the
 | `src/workflow-tool.ts` | The `workflow` tool: prompt guidelines, tool row rendering, status line, abort handling. |
 | `src/agent.ts` | `WorkflowAgent`, an in-memory subagent runner, and the session event mapper. |
 | `src/cursor-backend.ts` | Cursor SDK backend: lazily loads `@cursor/sdk` and maps its run messages to agent events. |
+| `src/progress-file.ts` | Progress files for t3code: snapshot, transcripts and stop sentinel under `T3_WORKFLOW_PROGRESS_DIR`. |
 | `src/run-store.ts` | In-memory run store: per-agent prompt, tool calls, output, tokens, status; stop controls. |
 | `src/workflow-notify.ts` | Background run notifications: the `<task-notification>` body, delivery choice (wake, or quiet for a user stop), the result size cap, the session teardown, and the message row. |
 | `src/workflow-view.ts` | The `/workflows` drill-down view: pure renderer, key reducer, and TUI component. |
